@@ -20,7 +20,7 @@ eyre.workspace = true
 tracing.workspace = true
 strum = { version = "0.26.2", features = ["derive"] }
 url = "2.5.0"
-reqwest = "0.12"
+reqwest.workspace = true
 
 helios-common = { path = "../common" }
 helios-core = { path = "../core" }
