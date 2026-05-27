@@ -1,4 +1,8 @@
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 use std::sync::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use alloy::{
     consensus::TrieAccount,
@@ -6,7 +10,11 @@ use alloy::{
     rpc::types::{EIP1186AccountProofResponse, EIP1186StorageProof},
 };
 use schnellru::{ByLength, LruMap};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::{mpsc, oneshot};
 
+#[cfg(not(target_arch = "wasm32"))]
+use helios_common::code_store::CodeStore;
 use helios_common::types::Account;
 
 // Cache capacities
@@ -20,6 +28,18 @@ const STORAGE_SLOTS_PER_ROOT_CACHE_SIZE: u32 = 256;
 // Code: Static and can be shared. Most valuable cache.
 const CODE_CACHE_SIZE: u32 = 256;
 
+/// Message handed to the background code persistence worker.
+#[cfg(not(target_arch = "wasm32"))]
+enum CodeMsg {
+    /// A new code blob just landed in the LRU; persist on the next
+    /// flush tick.
+    Persist(B256, Bytes),
+    /// Drain the buffer to the store now and signal completion.
+    /// Used by callers that want to guarantee persistence before
+    /// shutdown.
+    Flush(oneshot::Sender<()>),
+}
+
 pub struct Cache {
     /// Storage proofs: content-addressed by storage_hash
     /// storage_hash -> slot -> full storage proof
@@ -32,6 +52,12 @@ pub struct Cache {
     /// Account proofs: block-specific
     /// (address, block_hash) -> account proof response (with empty storage_proof)
     accounts: RwLock<LruMap<(Address, B256), EIP1186AccountProofResponse>>,
+
+    /// Sender into the background code persistence worker. `None`
+    /// when no `CodeStore` is configured. Sends are fire-and-forget
+    /// so the hot path never blocks on IO.
+    #[cfg(not(target_arch = "wasm32"))]
+    code_msg_tx: Option<mpsc::UnboundedSender<CodeMsg>>,
 }
 
 impl Default for Cache {
@@ -46,7 +72,69 @@ impl Cache {
             storage: RwLock::new(LruMap::new(ByLength::new(STORAGE_CACHE_SIZE))),
             code: RwLock::new(LruMap::new(ByLength::new(CODE_CACHE_SIZE))),
             accounts: RwLock::new(LruMap::new(ByLength::new(ACCOUNTS_CACHE_SIZE))),
+            #[cfg(not(target_arch = "wasm32"))]
+            code_msg_tx: None,
         }
+    }
+
+    /// Build a `Cache` whose code sub-cache is backed by an external
+    /// `CodeStore`. The store is consulted exactly once, here, to
+    /// warm the in-memory LRU; subsequent reads are pure memory.
+    ///
+    /// A background tokio task is spawned that drains a channel of
+    /// newly cached blobs on every `flush_interval` tick and hands
+    /// the batch to `store.persist`. The hot insert path only
+    /// touches the channel, never the store, so reads and writes
+    /// are not coupled to IO latency.
+    ///
+    /// Must be called from inside an active tokio runtime, since the
+    /// flush worker is a `tokio::spawn`-ed task.
+    ///
+    /// Use [`Cache::flush_code_store`] to force a synchronous flush
+    /// before shutdown.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_code_store(store: Arc<dyn CodeStore>, flush_interval: Duration) -> Self {
+        // Warm the in-memory LRU from whatever the store has on hand.
+        // The LRU evicts beyond `CODE_CACHE_SIZE`, so the most useful
+        // strategy for a `CodeStore` is to return its newest entries
+        // last; older ones will fall out on insertion.
+        let preload = store.load_all();
+        let cache = Self::new();
+        {
+            let mut code = cache.code.write().unwrap_or_else(|e| e.into_inner());
+            for (hash, bytes) in preload {
+                code.insert(hash, bytes);
+            }
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(code_persistence_worker(rx, store, flush_interval));
+
+        Self {
+            code_msg_tx: Some(tx),
+            ..cache
+        }
+    }
+
+    /// Drain any code blobs still pending persistence and wait for
+    /// the worker to write them to the `CodeStore`. Returns
+    /// immediately if no store is configured or the worker has
+    /// already exited.
+    ///
+    /// Intended for graceful shutdown paths: between two periodic
+    /// flushes, up to one window's worth of newly cached code may be
+    /// queued only in memory. Calling this before drop guarantees
+    /// the queue is flushed; otherwise that window is the cost of
+    /// the latency-first design.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn flush_code_store(&self) {
+        let Some(tx) = &self.code_msg_tx else { return };
+        let (notify_tx, notify_rx) = oneshot::channel();
+        if tx.send(CodeMsg::Flush(notify_tx)).is_err() {
+            // Worker has exited; nothing to flush.
+            return;
+        }
+        let _ = notify_rx.await;
     }
 
     /// Insert a VERIFIED account proof response into the cache.
@@ -86,8 +174,28 @@ impl Cache {
         }
 
         if let Some(code) = code {
-            let mut code_cache = self.code.write().unwrap_or_else(|e| e.into_inner());
-            code_cache.insert(response.code_hash, code);
+            {
+                let mut code_cache = self.code.write().unwrap_or_else(|e| e.into_inner());
+                code_cache.insert(response.code_hash, code.clone());
+            }
+            // Fire and forget into the persistence channel. `Bytes`
+            // is `Arc`-backed, so the clone is cheap. A `send` error
+            // means the worker has exited, which is fine: the
+            // in-memory LRU is the source of truth.
+            //
+            // EIP-7702 delegation designators are skipped: they leak
+            // which delegation targets the user has touched if the
+            // data dir is inspected, and the disk-cache saving for a
+            // 23-byte blob is rounding error compared to the
+            // surrounding TLS handshake. Designators are still kept
+            // in the in-memory LRU so revm hits the cache when it
+            // calls a delegated EOA repeatedly within a session.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(tx) = &self.code_msg_tx {
+                if !is_delegation_designator(&code) {
+                    let _ = tx.send(CodeMsg::Persist(response.code_hash, code));
+                }
+            }
         }
 
         let account_response = EIP1186AccountProofResponse {
@@ -212,6 +320,86 @@ impl Cache {
 
         Some((account, missing_slots))
     }
+}
+
+/// Background task that owns the persistence-side of a `Cache` with
+/// a configured `CodeStore`. It batches inserts arriving on `rx`
+/// and either:
+///
+/// 1. flushes on each `flush_interval` tick, or
+/// 2. flushes immediately on a `CodeMsg::Flush` request, or
+/// 3. drains and exits when the sender is dropped (cache going away).
+#[cfg(not(target_arch = "wasm32"))]
+async fn code_persistence_worker(
+    mut rx: mpsc::UnboundedReceiver<CodeMsg>,
+    store: Arc<dyn CodeStore>,
+    flush_interval: Duration,
+) {
+    use tokio::time::{interval, MissedTickBehavior};
+
+    let mut pending: Vec<(B256, Bytes)> = Vec::new();
+    let mut ticker = interval(flush_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // The first tick fires immediately by default; skip it so a
+    // freshly built cache does not race a write before the consumer
+    // has had any opportunity to insert anything.
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                flush(&mut pending, store.as_ref());
+            }
+            msg = rx.recv() => match msg {
+                None => {
+                    // Sender side dropped; the cache is gone. Final
+                    // best-effort flush and exit so we do not leak
+                    // the task.
+                    flush(&mut pending, store.as_ref());
+                    return;
+                }
+                Some(CodeMsg::Persist(hash, code)) => {
+                    pending.push((hash, code));
+                }
+                Some(CodeMsg::Flush(notify)) => {
+                    flush(&mut pending, store.as_ref());
+                    // If the caller has already dropped the receiver
+                    // we still consider the flush complete; the IO
+                    // has happened either way.
+                    let _ = notify.send(());
+                }
+            }
+        }
+    }
+}
+
+/// Move `pending` into a fresh `Vec`, hand the batch to the store,
+/// and leave `pending` empty for the next cycle.
+#[cfg(not(target_arch = "wasm32"))]
+fn flush(pending: &mut Vec<(B256, Bytes)>, store: &dyn CodeStore) {
+    if pending.is_empty() {
+        return;
+    }
+    let batch = std::mem::take(pending);
+    store.persist(&batch);
+}
+
+/// Detect EIP-7702 delegation designators. A delegation designator
+/// is exactly 23 bytes: the [`EIP7702_DELEGATION_DESIGNATOR`] magic
+/// prefix `0xef0100` followed by the 20-byte delegation target
+/// address.
+///
+/// We keep designators in the in-memory cache (revm needs them when
+/// calling a delegated EOA) but skip persisting them: they are
+/// short, so the disk-cache win is negligible, and writing them out
+/// would leak which delegation targets the user has touched.
+///
+/// [`EIP7702_DELEGATION_DESIGNATOR`]: alloy::eips::eip7702::constants::EIP7702_DELEGATION_DESIGNATOR
+#[cfg(not(target_arch = "wasm32"))]
+fn is_delegation_designator(code: &Bytes) -> bool {
+    use alloy::eips::eip7702::constants::EIP7702_DELEGATION_DESIGNATOR;
+    const DESIGNATOR_LEN: usize = EIP7702_DELEGATION_DESIGNATOR.len() + 20;
+    code.len() == DESIGNATOR_LEN && code.as_ref().starts_with(&EIP7702_DELEGATION_DESIGNATOR)
 }
 
 #[cfg(test)]
@@ -404,5 +592,183 @@ mod tests {
             Some((code_hash, code))
         );
         assert_eq!(cache.get_code_optimistically(other_address), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod code_store {
+        use super::*;
+        use std::sync::Mutex;
+
+        /// Test double for `CodeStore`. Records the entries persisted
+        /// so we can assert the cache routed them through correctly.
+        struct MockStore {
+            preload: Vec<(B256, Bytes)>,
+            persisted: Arc<Mutex<Vec<(B256, Bytes)>>>,
+        }
+
+        impl helios_common::code_store::CodeStore for MockStore {
+            fn load_all(&self) -> Vec<(B256, Bytes)> {
+                self.preload.clone()
+            }
+            fn persist(&self, entries: &[(B256, Bytes)]) {
+                self.persisted.lock().unwrap().extend_from_slice(entries);
+            }
+        }
+
+        fn insert_code(cache: &Cache, code_hash: B256, code: Bytes) {
+            let address = address!("0000000000000000000000000000000000000099");
+            let storage_hash =
+                b256!("00000000000000000000000000000000000000000000000000000000000000aa");
+            let block_hash =
+                b256!("00000000000000000000000000000000000000000000000000000000000000bb");
+            let response = mock_account_proof_response(address, storage_hash, code_hash, vec![]);
+            cache.insert(response, Some(code), block_hash);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn warms_lru_from_store_on_construct() {
+            let preload_hash =
+                b256!("0000000000000000000000000000000000000000000000000000000000000010");
+            let preload_code = Bytes::from_static(b"preloaded bytecode");
+
+            let store = Arc::new(MockStore {
+                preload: vec![(preload_hash, preload_code.clone())],
+                persisted: Arc::new(Mutex::new(Vec::new())),
+            });
+
+            let cache = Cache::with_code_store(store, Duration::from_secs(30));
+
+            assert_eq!(cache.get_code(preload_hash), Some(preload_code));
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn periodic_flush_persists_inserts() {
+            let persisted = Arc::new(Mutex::new(Vec::new()));
+            let store = Arc::new(MockStore {
+                preload: vec![],
+                persisted: persisted.clone(),
+            });
+
+            // Short flush interval so the test does not wait long.
+            let cache = Cache::with_code_store(store, Duration::from_millis(25));
+
+            let code_hash =
+                b256!("0000000000000000000000000000000000000000000000000000000000000020");
+            let code = Bytes::from_static(b"freshly fetched bytecode");
+            insert_code(&cache, code_hash, code.clone());
+
+            // The in-memory LRU is populated immediately; persistence
+            // is decoupled and only happens on the next tick.
+            assert_eq!(cache.get_code(code_hash), Some(code.clone()));
+            assert!(persisted.lock().unwrap().is_empty());
+
+            // Poll for up to 1 s for the persisted batch to arrive.
+            // Real time is fine here: the worker fires roughly every
+            // 25 ms.
+            let start = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if !persisted.lock().unwrap().is_empty() {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(1),
+                    "worker did not flush within 1 s"
+                );
+            }
+
+            assert_eq!(*persisted.lock().unwrap(), vec![(code_hash, code)]);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn eip7702_designators_skipped_for_persistence() {
+            let persisted = Arc::new(Mutex::new(Vec::new()));
+            let store = Arc::new(MockStore {
+                preload: vec![],
+                persisted: persisted.clone(),
+            });
+
+            let cache = Cache::with_code_store(store, Duration::from_millis(25));
+
+            // Build a delegation designator using alloy's canonical
+            // magic-prefix constant so this test follows the spec
+            // (and breaks loudly if upstream ever moves the prefix).
+            use alloy::eips::eip7702::constants::EIP7702_DELEGATION_DESIGNATOR;
+            let target = [0x42u8; 20];
+            let mut designator = EIP7702_DELEGATION_DESIGNATOR.to_vec();
+            designator.extend_from_slice(&target);
+            assert_eq!(designator.len(), 23);
+            let designator_bytes = Bytes::from(designator);
+            let designator_hash =
+                b256!("0000000000000000000000000000000000000000000000000000000000000050");
+
+            // And a real contract for the positive control: the
+            // realistic blob still gets persisted, while the
+            // designator does not.
+            let contract_hash =
+                b256!("0000000000000000000000000000000000000000000000000000000000000051");
+            let contract_code = Bytes::from_static(b"\x60\x80\x60\x40real contract");
+
+            insert_code(&cache, designator_hash, designator_bytes.clone());
+            insert_code(&cache, contract_hash, contract_code.clone());
+
+            // Designator must still be retrievable in memory: revm
+            // needs it when calling a delegated EOA.
+            assert_eq!(cache.get_code(designator_hash), Some(designator_bytes));
+
+            // Wait up to 1 s for the real contract to land on disk;
+            // by the time it does, the designator should still not
+            // have been persisted.
+            let start = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if persisted
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(h, _)| *h == contract_hash)
+                {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(1),
+                    "worker did not flush within 1 s"
+                );
+            }
+
+            let snapshot = persisted.lock().unwrap().clone();
+            assert!(
+                snapshot.iter().all(|(h, _)| *h != designator_hash),
+                "delegation designator must not be persisted, got: {snapshot:?}"
+            );
+            assert!(
+                snapshot.iter().any(|(h, b)| *h == contract_hash && b == &contract_code),
+                "real contract code must be persisted, got: {snapshot:?}"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn flush_code_store_drains_synchronously() {
+            let persisted = Arc::new(Mutex::new(Vec::new()));
+            let store = Arc::new(MockStore {
+                preload: vec![],
+                persisted: persisted.clone(),
+            });
+
+            // Long interval so the test could not flush via the
+            // ticker on its own.
+            let cache = Cache::with_code_store(store, Duration::from_secs(3600));
+
+            let code_hash =
+                b256!("0000000000000000000000000000000000000000000000000000000000000030");
+            let code = Bytes::from_static(b"awaiting flush");
+            insert_code(&cache, code_hash, code.clone());
+
+            assert!(persisted.lock().unwrap().is_empty());
+
+            cache.flush_code_store().await;
+
+            assert_eq!(*persisted.lock().unwrap(), vec![(code_hash, code)]);
+        }
     }
 }
