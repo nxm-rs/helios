@@ -66,17 +66,34 @@ impl HttpRpc {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: ConsensusSpec> ConsensusRpc<S> for HttpRpc {
-    fn new(rpc: &str) -> Self {
+impl HttpRpc {
+    /// Construct an `HttpRpc` instance, optionally letting the
+    /// caller modify the underlying `reqwest::ClientBuilder` (e.g.
+    /// to install `use_preconfigured_tls(...)` for a custom TLS
+    /// trust store). Helios still owns the per-site timeouts; the
+    /// hook runs on the partially-configured builder before
+    /// `.build()`.
+    ///
+    /// This is the constructor used by `EthereumClientBuilder` when
+    /// a hook is configured. The trait method [`ConsensusRpc::new`]
+    /// delegates to this with `hook = None`.
+    pub fn with_hook(
+        rpc: &str,
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        hook: Option<helios_core::execution::providers::rpc::HttpBuilderHook>,
+    ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30)) // Add request timeout
-            .connect_timeout(Duration::from_secs(10)) // Add connection timeout
-            .pool_idle_timeout(Duration::from_secs(60)) // Clean up idle connections
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = {
+            let builder = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30)) // Add request timeout
+                .connect_timeout(Duration::from_secs(10)) // Add connection timeout
+                .pool_idle_timeout(Duration::from_secs(60)); // Clean up idle connections
+            let builder = match hook.as_ref() {
+                Some(h) => h(builder),
+                None => builder,
+            };
+            builder.build().unwrap_or_else(|_| reqwest::Client::new())
+        };
 
         #[cfg(target_arch = "wasm32")]
         let client = reqwest::Client::new();
@@ -85,6 +102,14 @@ impl<S: ConsensusSpec> ConsensusRpc<S> for HttpRpc {
             client,
             rpc: rpc.trim_end_matches('/').to_string(),
         }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: ConsensusSpec> ConsensusRpc<S> for HttpRpc {
+    fn new(rpc: &str) -> Self {
+        Self::with_hook(rpc, None)
     }
 
     async fn get_bootstrap(&self, block_root: B256) -> Result<Bootstrap<S>> {

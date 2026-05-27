@@ -117,6 +117,15 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> Consensus<Block>
 
 impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> ConsensusClient<S, R, DB> {
     pub fn new(rpc: &Url, config: Arc<Config>) -> Result<ConsensusClient<S, R, DB>> {
+        Self::with_rpc(R::new(rpc.as_str()), config)
+    }
+
+    /// Variant of [`ConsensusClient::new`] that accepts a pre-built
+    /// RPC instance. Lets the caller configure the transport
+    /// (TLS, timeouts) before handing it in — e.g.
+    /// `HttpRpc::with_hook(rpc, hook)` for a consumer-supplied
+    /// `reqwest::ClientBuilder` hook.
+    pub fn with_rpc(rpc: R, config: Arc<Config>) -> Result<ConsensusClient<S, R, DB>> {
         let (block_send, block_recv) = channel(256);
         let (finalized_block_send, finalized_block_recv) = watch::channel(None);
         let (checkpoint_send, checkpoint_recv) = watch::channel(None);
@@ -124,7 +133,6 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> ConsensusClient<S, R, D
         let (shutdown_send, shutdown_recv) = watch::channel(false);
 
         let config_clone = config.clone();
-        let rpc = rpc.to_string();
         let genesis_time = config.chain.genesis_time;
         let db = Arc::new(DB::new(&config)?);
         let initial_checkpoint = config
@@ -140,8 +148,8 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>, DB: Database> ConsensusClient<S, R, D
         let mut shutdown_rx = shutdown_recv.clone();
 
         run(async move {
-            let mut inner = Inner::<S, R>::new(
-                &rpc,
+            let mut inner = Inner::<S, R>::with_rpc(
+                rpc,
                 block_send,
                 finalized_block_send,
                 checkpoint_send,
@@ -300,8 +308,26 @@ impl<S: ConsensusSpec, R: ConsensusRpc<S>> Inner<S, R> {
         checkpoint_send: watch::Sender<Option<B256>>,
         config: Arc<Config>,
     ) -> Inner<S, R> {
-        let rpc = R::new(rpc);
+        Self::with_rpc(
+            R::new(rpc),
+            block_send,
+            finalized_block_send,
+            checkpoint_send,
+            config,
+        )
+    }
 
+    /// Variant of [`Inner::new`] that accepts a pre-built RPC
+    /// instance. Used by `ConsensusClient::with_rpc` so the caller
+    /// can configure the underlying transport (TLS, timeouts) before
+    /// handing it in.
+    pub fn with_rpc(
+        rpc: R,
+        block_send: Sender<Block<Transaction>>,
+        finalized_block_send: watch::Sender<Option<Block<Transaction>>>,
+        checkpoint_send: watch::Sender<Option<B256>>,
+        config: Arc<Config>,
+    ) -> Inner<S, R> {
         Inner {
             rpc,
             store: LightClientStore::default(),
