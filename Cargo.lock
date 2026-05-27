@@ -4060,7 +4060,6 @@ dependencies = [
  "helios-core",
  "helios-revm-utils",
  "hex",
- "openssl",
  "parking_lot 0.12.4",
  "reqwest",
  "retri",
