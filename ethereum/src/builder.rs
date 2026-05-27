@@ -16,6 +16,8 @@ use helios_core::execution::providers::historical::eip2935::Eip2935Provider;
 use helios_core::execution::providers::rpc::RpcExecutionProvider;
 use helios_core::execution::providers::verifiable_api::VerifiableApiExecutionProvider;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::code_store::FileCodeStore;
 use crate::config::networks::Network;
 use crate::config::Config;
 use crate::consensus::ConsensusClient;
@@ -25,6 +27,13 @@ use crate::database::{ConfigDB, Database};
 use crate::rpc::http_rpc::HttpRpc;
 use crate::spec::Ethereum;
 use crate::EthereumClient;
+
+/// Default flush cadence for the disk-backed code cache. Picked
+/// large enough that bursty insert traffic batches efficiently and
+/// small enough that a crash window stays bounded.
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_CODE_CACHE_FLUSH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 pub struct EthereumClientBuilder<DB: Database> {
     network: Option<Network>,
@@ -267,7 +276,7 @@ impl<DB: Database> EthereumClientBuilder<DB> {
                 block_provider,
                 historical_provider,
             );
-            let execution = CachingProvider::new(execution);
+            let execution = build_caching_provider(execution, config.data_dir.as_ref());
 
             Ok(EthereumClient::new(
                 consensus,
@@ -286,7 +295,7 @@ impl<DB: Database> EthereumClientBuilder<DB> {
                 block_provider,
                 historical_provider,
             );
-            let execution = CachingProvider::new(execution);
+            let execution = build_caching_provider(execution, config.data_dir.as_ref());
 
             Ok(EthereumClient::new(
                 consensus,
@@ -310,4 +319,25 @@ impl EthereumClientBuilder<ConfigDB> {
     pub fn with_config_db(self) -> Self {
         self
     }
+}
+
+/// Wrap the inner execution provider in a `CachingProvider`. When a
+/// `data_dir` is configured, the code sub-cache is backed by a
+/// `FileCodeStore` rooted at `<data_dir>/code_cache` so cold starts
+/// can skip re-fetching contract bytecode that has been seen before.
+/// Otherwise the cache is purely in-memory and identical to the
+/// previous behaviour.
+fn build_caching_provider<P>(
+    inner: P,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] data_dir: Option<
+        &std::path::PathBuf,
+    >,
+) -> CachingProvider<P> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(dir) = data_dir {
+        let store: Arc<dyn helios_common::code_store::CodeStore> =
+            Arc::new(FileCodeStore::new(dir.join("code_cache")));
+        return CachingProvider::with_code_store(inner, store, DEFAULT_CODE_CACHE_FLUSH_INTERVAL);
+    }
+    CachingProvider::new(inner)
 }

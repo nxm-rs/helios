@@ -32,6 +32,30 @@ impl<P> CachingProvider<P> {
             cache: Arc::new(Cache::new()),
         }
     }
+
+    /// Build a `CachingProvider` whose code sub-cache is backed by an
+    /// external `CodeStore` (persisted to disk, browser storage, or
+    /// any other implementation). Reads stay in-memory; writes are
+    /// batched and flushed by a background worker on `flush_interval`.
+    ///
+    /// See [`Cache::with_code_store`] for the latency contract.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_code_store(
+        inner: P,
+        store: Arc<dyn helios_common::code_store::CodeStore>,
+        flush_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            inner,
+            cache: Arc::new(Cache::with_code_store(store, flush_interval)),
+        }
+    }
+
+    /// Expose the cache so consumers can drive it (e.g. call
+    /// `flush_code_store` on graceful shutdown).
+    pub fn cache(&self) -> Arc<Cache> {
+        self.cache.clone()
+    }
 }
 
 impl<N, P> ExecutionProvider<N> for CachingProvider<P>

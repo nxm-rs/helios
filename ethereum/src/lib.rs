@@ -2,6 +2,8 @@ use helios_core::client::HeliosClient;
 use spec::Ethereum;
 
 pub mod builder;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_store;
 pub mod config;
 pub mod consensus;
 pub mod database;
