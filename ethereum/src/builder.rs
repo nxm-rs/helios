@@ -49,6 +49,8 @@ pub struct EthereumClientBuilder<DB: Database> {
     fallback: Option<Url>,
     load_external_fallback: bool,
     strict_checkpoint_age: bool,
+    http_builder_hook:
+        Option<helios_core::execution::providers::rpc::HttpBuilderHook>,
     phantom: PhantomData<DB>,
 }
 
@@ -68,6 +70,7 @@ impl<DB: Database> Default for EthereumClientBuilder<DB> {
             fallback: None,
             load_external_fallback: false,
             strict_checkpoint_age: false,
+            http_builder_hook: None,
             phantom: PhantomData,
         }
     }
@@ -148,6 +151,24 @@ impl<DB: Database> EthereumClientBuilder<DB> {
 
     pub fn strict_checkpoint_age(mut self) -> Self {
         self.strict_checkpoint_age = true;
+        self
+    }
+
+    /// Install a hook that helios applies to every
+    /// `reqwest::ClientBuilder` it uses before `.build()`. Lets the
+    /// caller stamp on TLS / DNS / connection-pool choices (typical
+    /// use: `use_preconfigured_tls(...)` for a custom trust store).
+    /// Helios still owns the per-site timeouts; the hook runs on
+    /// the partially-configured builder.
+    ///
+    /// Currently wired into the consensus `HttpRpc` and the alloy
+    /// execution provider — the two clients on a normal Ethereum
+    /// light-client path.
+    pub fn http_builder_hook(
+        mut self,
+        hook: helios_core::execution::providers::rpc::HttpBuilderHook,
+    ) -> Self {
+        self.http_builder_hook = Some(hook);
         self
     }
 
@@ -262,10 +283,14 @@ impl<DB: Database> EthereumClientBuilder<DB> {
         };
 
         let config = Arc::new(config);
-        let consensus = ConsensusClient::<MainnetConsensusSpec, HttpRpc, DB>::new(
-            &config.consensus_rpc,
-            config.clone(),
-        )?;
+
+        // Construct the consensus RPC up front, applying the
+        // caller's `http_builder_hook` if any, then hand it to
+        // ConsensusClient via the `with_rpc` variant.
+        let consensus_rpc =
+            HttpRpc::with_hook(config.consensus_rpc.as_str(), self.http_builder_hook.clone());
+        let consensus =
+            ConsensusClient::<MainnetConsensusSpec, HttpRpc, DB>::with_rpc(consensus_rpc, config.clone())?;
 
         if let Some(verifiable_api) = &config.verifiable_api {
             let block_provider = BlockCache::<Ethereum>::new();
@@ -290,10 +315,11 @@ impl<DB: Database> EthereumClientBuilder<DB> {
             // Create EIP-2935 historical block provider
             let rpc_url = config.execution_rpc.as_ref().unwrap().clone();
             let historical_provider = Eip2935Provider::new();
-            let execution = RpcExecutionProvider::with_historical_provider(
+            let execution = RpcExecutionProvider::with_historical_provider_and_hook(
                 rpc_url,
                 block_provider,
                 historical_provider,
+                self.http_builder_hook.clone(),
             );
             let execution = build_caching_provider(execution, config.data_dir.as_ref());
 

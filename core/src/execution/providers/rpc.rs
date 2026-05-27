@@ -42,6 +42,38 @@ use crate::execution::{
 
 use super::utils::ensure_logs_match_filter;
 
+/// Hook that consumers can install to modify every
+/// `reqwest::ClientBuilder` helios uses before `.build()`. Helios
+/// applies its own per-site timeouts and other settings first, then
+/// invokes the hook (if any) to let the caller stamp on
+/// TLS / DNS / connection-pool choices. Typical use: set a
+/// `use_preconfigured_tls(...)` so verification goes through bundled
+/// roots instead of `rustls-platform-verifier`.
+///
+/// Helios itself stays neutral on TLS — the only place this type is
+/// constructed is in caller code.
+pub type HttpBuilderHook =
+    std::sync::Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
+
+/// Apply the optional hook to a `reqwest::ClientBuilder`. Helpful at
+/// each helios HTTP construction site so the caller's hook gets a
+/// uniform chance to run regardless of which builder is in play.
+fn apply_hook(
+    builder: reqwest::ClientBuilder,
+    hook: Option<&HttpBuilderHook>,
+) -> reqwest::ClientBuilder {
+    match hook {
+        Some(h) => h(builder),
+        None => builder,
+    }
+}
+
+fn build_reqwest_client(hook: Option<&HttpBuilderHook>) -> reqwest::Client {
+    apply_hook(reqwest::Client::builder(), hook)
+        .build()
+        .expect("reqwest::Client builder")
+}
+
 // Implementation for unit type to provide no historical block support
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -75,9 +107,17 @@ impl<N: NetworkSpec, B: BlockProvider<N>, H: HistoricalBlockProvider<N>>
     RpcExecutionProvider<N, B, H>
 {
     pub fn new(rpc_url: Url, block_provider: B) -> RpcExecutionProvider<N, B, ()> {
+        Self::new_with_hook(rpc_url, block_provider, None)
+    }
+
+    pub fn new_with_hook(
+        rpc_url: Url,
+        block_provider: B,
+        hook: Option<HttpBuilderHook>,
+    ) -> RpcExecutionProvider<N, B, ()> {
         let client = ClientBuilder::default()
             .layer(RetryBackoffLayer::new(100, 50, 300))
-            .http(rpc_url);
+            .http_with_client(build_reqwest_client(hook.as_ref()), rpc_url);
 
         let provider = ProviderBuilder::<_, _, N>::default().connect_client(client);
 
@@ -93,9 +133,18 @@ impl<N: NetworkSpec, B: BlockProvider<N>, H: HistoricalBlockProvider<N>>
         block_provider: B,
         historical_provider: H,
     ) -> Self {
+        Self::with_historical_provider_and_hook(rpc_url, block_provider, historical_provider, None)
+    }
+
+    pub fn with_historical_provider_and_hook(
+        rpc_url: Url,
+        block_provider: B,
+        historical_provider: H,
+        hook: Option<HttpBuilderHook>,
+    ) -> Self {
         let client = ClientBuilder::default()
             .layer(RetryBackoffLayer::new(100, 50, 300))
-            .http(rpc_url);
+            .http_with_client(build_reqwest_client(hook.as_ref()), rpc_url);
 
         let provider = ProviderBuilder::<_, _, N>::default().connect_client(client);
 
