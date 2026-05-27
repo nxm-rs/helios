@@ -49,8 +49,6 @@ impl<N: NetworkSpec> VerifiableApi<N> for HttpVerifiableApi<N> {
             .tcp_nodelay(true)
             // Fast decompression
             .brotli(true)
-            // Faster DNS resolution
-            .hickory_dns(true)
             // Use http2
             .http2_prior_knowledge();
 
