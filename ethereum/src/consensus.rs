@@ -700,6 +700,11 @@ fn payload_to_block<S: ConsensusSpec>(value: ExecutionPayload<S>) -> Block<Trans
         Transaction {
             block_hash: Some(block_hash),
             block_number: Some(block_number),
+            // alloy 2.0 added the optional `block_timestamp` field on
+            // `Transaction`. We don't have it from the consensus
+            // payload here, so leave it as None; it can be filled by
+            // a downstream consumer if needed.
+            block_timestamp: None,
             transaction_index: Some(i as u64),
             effective_gas_price: Some(effective_gas_price),
             inner: recovered,
@@ -747,6 +752,12 @@ fn payload_to_block<S: ConsensusSpec>(value: ExecutionPayload<S>) -> Block<Trans
         parent_beacon_block_root: None,
         extra_data: value.extra_data().inner.to_vec().into(),
         requests_hash: None,
+        // alloy 2.0 added Amsterdam-hardfork header fields. None of
+        // them are populated by the current consensus pipeline; leave
+        // as None until the relevant fork ships and the consensus
+        // payload exposes them.
+        slot_number: None,
+        block_access_list_hash: None,
         logs_bloom,
     };
 

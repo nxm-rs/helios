@@ -291,15 +291,23 @@ fn payload_to_block(value: ExecutionPayload) -> Result<Block<Transaction>> {
                 inner: recovered,
                 block_hash: Some(value.block_hash),
                 block_number: Some(value.block_number),
+                // alloy 2.0 added an optional `block_timestamp`; the
+                // consensus payload does not surface a per-tx timestamp
+                // here, so leave it as None.
+                block_timestamp: None,
                 transaction_index: Some(i as u64),
                 effective_gas_price: Some(base_fee),
             };
 
             Ok(match inner_tx.inner.inner() {
+                // op-alloy 2.0 added the `PostExec` synthetic
+                // transaction type (0x7d). It has no deposit fields,
+                // so it shares the non-deposit branch.
                 OpTxEnvelope::Legacy(_)
                 | OpTxEnvelope::Eip2930(_)
                 | OpTxEnvelope::Eip1559(_)
-                | OpTxEnvelope::Eip7702(_) => Transaction {
+                | OpTxEnvelope::Eip7702(_)
+                | OpTxEnvelope::PostExec(_) => Transaction {
                     inner: inner_tx,
                     deposit_nonce: None,
                     deposit_receipt_version: None,
@@ -348,6 +356,10 @@ fn payload_to_block(value: ExecutionPayload) -> Result<Block<Transaction>> {
         parent_beacon_block_root: None,
         extra_data: value.extra_data.to_vec().into(),
         requests_hash: None,
+        // alloy 2.0 added Amsterdam-hardfork header fields; the
+        // current consensus pipeline does not populate them.
+        slot_number: None,
+        block_access_list_hash: None,
         logs_bloom,
     };
 

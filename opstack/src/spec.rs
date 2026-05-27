@@ -1,10 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use alloy::{
-    consensus::{proofs::calculate_transaction_root, Receipt, ReceiptWithBloom, TxReceipt, TxType},
+    consensus::{proofs::calculate_transaction_root, Receipt, ReceiptWithBloom, TxType},
     eips::{BlockId, Encodable2718},
-    primitives::{Address, Bytes, ChainId, TxKind, U256},
-    rpc::types::{state::StateOverride, AccessList, Log, TransactionRequest},
+    primitives::Address,
+    rpc::types::{state::StateOverride, Log},
 };
 
 use async_trait::async_trait;
@@ -15,11 +15,11 @@ use helios_common::{
     types::{Account, EvmError},
 };
 use op_alloy_consensus::{
-    OpDepositReceipt, OpDepositReceiptWithBloom, OpReceiptEnvelope, OpTxEnvelope, OpTxType,
+    OpDepositReceipt, OpDepositReceiptWithBloom, OpReceipt, OpTxEnvelope, OpTxType,
     OpTypedTransaction,
 };
 use op_alloy_network::{
-    BuildResult, Ethereum, Network, NetworkWallet, TransactionBuilder, TransactionBuilderError,
+    BuildResult, Network, NetworkTransactionBuilder, NetworkWallet, TransactionBuilderError,
 };
 use op_alloy_rpc_types::{OpTransactionRequest, Transaction};
 use op_revm::OpHaltReason;
@@ -36,39 +36,48 @@ impl NetworkSpec for OpStack {
     type HaltReason = OpHaltReason;
 
     fn encode_receipt(receipt: &Self::ReceiptResponse) -> Vec<u8> {
-        let receipt = &receipt.inner.inner;
-        let bloom = receipt.bloom();
-        let tx_type = receipt.tx_type();
-        let logs = receipt
-            .logs()
+        // op-alloy 2.0 reshaped the receipt envelope: what used to be
+        // `OpReceiptEnvelope<Log>` is now `ReceiptWithBloom<OpReceipt<Log>>`.
+        // The bloom moved from the envelope variant into the outer
+        // `ReceiptWithBloom`, and the inner `OpReceipt` enum holds a
+        // bare `Receipt<Log>` per variant (and `OpDepositReceipt<Log>` for
+        // the deposit variant).
+        let receipt_with_bloom = &receipt.inner.inner;
+        let bloom = receipt_with_bloom.logs_bloom;
+        let op_receipt = &receipt_with_bloom.receipt;
+        let tx_type = op_receipt.tx_type();
+        let logs = op_receipt
+            .as_receipt()
+            .logs
             .iter()
             .map(|l| l.inner.clone())
             .collect::<Vec<_>>();
 
-        let raw_encoded = match receipt {
-            OpReceiptEnvelope::Legacy(inner)
-            | OpReceiptEnvelope::Eip2930(inner)
-            | OpReceiptEnvelope::Eip1559(inner)
-            | OpReceiptEnvelope::Eip7702(inner) => {
+        let raw_encoded = match op_receipt {
+            OpReceipt::Legacy(inner)
+            | OpReceipt::Eip2930(inner)
+            | OpReceipt::Eip1559(inner)
+            | OpReceipt::Eip7702(inner)
+            | OpReceipt::PostExec(inner) => {
                 let r = Receipt {
-                    status: inner.status_or_post_state(),
-                    cumulative_gas_used: inner.cumulative_gas_used(),
+                    status: inner.status,
+                    cumulative_gas_used: inner.cumulative_gas_used,
                     logs,
                 };
                 let rwb = ReceiptWithBloom::new(r, bloom);
                 alloy::rlp::encode(rwb)
             }
-            OpReceiptEnvelope::Deposit(inner) => {
+            OpReceipt::Deposit(inner) => {
                 let r = Receipt {
-                    status: inner.receipt.inner.status,
-                    cumulative_gas_used: inner.receipt.inner.cumulative_gas_used,
+                    status: inner.inner.status,
+                    cumulative_gas_used: inner.inner.cumulative_gas_used,
                     logs,
                 };
 
                 let r = OpDepositReceipt {
                     inner: r,
-                    deposit_nonce: inner.receipt.deposit_nonce,
-                    deposit_receipt_version: inner.receipt.deposit_receipt_version,
+                    deposit_nonce: inner.deposit_nonce,
+                    deposit_receipt_version: inner.deposit_receipt_version,
                 };
 
                 let rwb = OpDepositReceiptWithBloom::new(r, bloom);
@@ -123,7 +132,7 @@ impl NetworkSpec for OpStack {
     }
 
     fn receipt_logs(receipt: &Self::ReceiptResponse) -> Vec<Log> {
-        receipt.inner.inner.logs().to_vec()
+        receipt.inner.inner.receipt.as_receipt().logs.clone()
     }
 
     async fn transact<E: ExecutionProvider<Self>>(
@@ -154,139 +163,42 @@ impl Network for OpStack {
     type BlockResponse = alloy::rpc::types::Block<Self::TransactionResponse, Self::HeaderResponse>;
 }
 
-impl TransactionBuilder<OpStack> for OpTransactionRequest {
-    fn chain_id(&self) -> Option<ChainId> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::chain_id(self.as_ref())
+// alloy 2.0 split `TransactionBuilder` into a base trait (getters and
+// setters, provided by `op-alloy-rpc-types` for `OpTransactionRequest`
+// already) and `NetworkTransactionBuilder<N>` (build, submit, type
+// selection). Because helios's `OpStack` is a distinct type from
+// op-alloy's `Optimism`, we still need our own `NetworkTransactionBuilder<OpStack>`
+// impl, but only for the build half. Bodies are identical in shape to
+// `op_alloy_network::Optimism`'s impl.
+impl NetworkTransactionBuilder<OpStack> for OpTransactionRequest {
+    fn can_submit(&self) -> bool {
+        // from must be set; everything else may be filled in by the
+        // RPC server on submission.
+        self.as_ref().from.is_some()
     }
 
-    fn set_chain_id(&mut self, chain_id: ChainId) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_chain_id(self.as_mut(), chain_id);
-    }
+    fn can_build(&self) -> bool {
+        let req = self.as_ref();
+        let common = req.gas.is_some() && req.nonce.is_some();
 
-    fn nonce(&self) -> Option<u64> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::nonce(self.as_ref())
-    }
-
-    fn set_nonce(&mut self, nonce: u64) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_nonce(self.as_mut(), nonce);
-    }
-
-    fn take_nonce(&mut self) -> Option<u64> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::take_nonce(self.as_mut())
-    }
-
-    fn input(&self) -> Option<&Bytes> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::input(self.as_ref())
-    }
-
-    fn set_input<T: Into<Bytes>>(&mut self, input: T) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_input(self.as_mut(), input);
-    }
-
-    fn from(&self) -> Option<Address> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::from(self.as_ref())
-    }
-
-    fn set_from(&mut self, from: Address) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_from(self.as_mut(), from);
-    }
-
-    fn kind(&self) -> Option<TxKind> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::kind(self.as_ref())
-    }
-
-    fn clear_kind(&mut self) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::clear_kind(self.as_mut());
-    }
-
-    fn set_kind(&mut self, kind: TxKind) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_kind(self.as_mut(), kind);
-    }
-
-    fn value(&self) -> Option<U256> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::value(self.as_ref())
-    }
-
-    fn set_value(&mut self, value: U256) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_value(self.as_mut(), value);
-    }
-
-    fn gas_price(&self) -> Option<u128> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::gas_price(self.as_ref())
-    }
-
-    fn set_gas_price(&mut self, gas_price: u128) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_gas_price(
-            self.as_mut(),
-            gas_price,
-        );
-    }
-
-    fn max_fee_per_gas(&self) -> Option<u128> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::max_fee_per_gas(self.as_ref())
-    }
-
-    fn set_max_fee_per_gas(&mut self, max_fee_per_gas: u128) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_max_fee_per_gas(
-            self.as_mut(),
-            max_fee_per_gas,
-        );
-    }
-
-    fn max_priority_fee_per_gas(&self) -> Option<u128> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::max_priority_fee_per_gas(
-            self.as_ref(),
-        )
-    }
-
-    fn set_max_priority_fee_per_gas(&mut self, max_priority_fee_per_gas: u128) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_max_priority_fee_per_gas(
-            self.as_mut(),
-            max_priority_fee_per_gas,
-        );
-    }
-
-    fn gas_limit(&self) -> Option<u64> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::gas_limit(self.as_ref())
-    }
-
-    fn set_gas_limit(&mut self, gas_limit: u64) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_gas_limit(
-            self.as_mut(),
-            gas_limit,
-        );
-    }
-
-    fn access_list(&self) -> Option<&AccessList> {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::access_list(self.as_ref())
-    }
-
-    fn set_access_list(&mut self, access_list: AccessList) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::set_access_list(
-            self.as_mut(),
-            access_list,
-        );
+        let legacy = req.gas_price.is_some();
+        let eip2930 = legacy && req.access_list.is_some();
+        let eip1559 = req.max_fee_per_gas.is_some() && req.max_priority_fee_per_gas.is_some();
+        let eip4844 = eip1559 && req.sidecar.is_some() && req.to.is_some();
+        let eip7702 = eip1559 && req.authorization_list.is_some();
+        common && (legacy || eip2930 || eip1559 || eip4844 || eip7702)
     }
 
     fn complete_type(&self, ty: OpTxType) -> Result<(), Vec<&'static str>> {
         match ty {
+            // Synthetic / non-user-buildable receipt types.
             OpTxType::Deposit => Err(vec!["not implemented for deposit tx"]),
-            _ => {
-                let ty = TxType::try_from(ty as u8).unwrap();
-                <TransactionRequest as TransactionBuilder<Ethereum>>::complete_type(
-                    self.as_ref(),
-                    ty,
-                )
-            }
+            OpTxType::PostExec => Err(vec!["not implemented for post-exec tx"]),
+            OpTxType::Legacy => self.as_ref().complete_legacy(),
+            OpTxType::Eip2930 => self.as_ref().complete_2930(),
+            OpTxType::Eip1559 => self.as_ref().complete_1559(),
+            OpTxType::Eip7702 => self.as_ref().complete_7702(),
         }
-    }
-
-    fn can_submit(&self) -> bool {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::can_submit(self.as_ref())
-    }
-
-    fn can_build(&self) -> bool {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::can_build(self.as_ref())
     }
 
     #[doc(alias = "output_transaction_type")]
@@ -310,7 +222,10 @@ impl TransactionBuilder<OpStack> for OpTransactionRequest {
     }
 
     fn prep_for_submission(&mut self) {
-        <TransactionRequest as TransactionBuilder<Ethereum>>::prep_for_submission(self.as_mut());
+        let req = self.as_mut();
+        req.transaction_type = Some(req.preferred_type() as u8);
+        req.trim_conflicting_keys();
+        req.populate_blob_hashes();
     }
 
     fn build_unsigned(self) -> BuildResult<OpTypedTransaction, OpStack> {

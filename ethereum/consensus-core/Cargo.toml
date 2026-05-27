@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Don't inherit workspace version to not inherit all of the features defined in the workspace
-alloy = { version = "1.0.3", default-features = false, features = [
+alloy = { version = "2.0", default-features = false, features = [
     "consensus",
     "rpc-types",
     "ssz",
@@ -36,5 +36,5 @@ wasmtimer.workspace = true
 tokio = { version = "1", features = ["full"] }
 snap = "1"
 serde_yaml = "0.9.34"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { workspace = true }
 serde_json = "1.0"

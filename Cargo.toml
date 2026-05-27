@@ -40,7 +40,7 @@ sha2 = "0.9"
 bls12_381 = { version = "0.8.0", features = ["experimental"] }
 
 # execution
-alloy = { version = "1.0.37", features = [
+alloy = { version = "2.0.5", features = [
     "rpc-types",
     "consensus",
     "rlp",
@@ -52,8 +52,8 @@ alloy = { version = "1.0.37", features = [
     "json-rpc",
     "signers",
 ] }
-alloy-trie = { version = "0.9.1", features = ["ethereum"] }
-op-alloy-rpc-types = "0.20.0"
+alloy-trie = { version = "0.9.5", features = ["ethereum"] }
+op-alloy-rpc-types = "2.0.0"
 revm = { version = "29.0.1", default-features = false, features = [
     "std",
     "serde",
@@ -68,9 +68,11 @@ futures = "0.3.23"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 
 # io
-reqwest = { version = "0.12.4", features = ["json", "gzip", "deflate", "zstd", "brotli", "hickory-dns"] }
-reqwest-middleware = { version = "0.4.2", features = ["json"] }
-reqwest-retry = "0.7.0"
+reqwest = { version = "0.13.4", features = ["json", "gzip", "deflate", "zstd", "brotli", "hickory-dns"] }
+# reqwest-middleware 0.5 split `query` out as an opt-in feature; the
+# verifiable-api client uses `.query(...)`, so we enable it explicitly.
+reqwest-middleware = { version = "0.5", features = ["json", "query"] }
+reqwest-retry = "0.9"
 url = { version = "2.5.2", features = ["serde"] }
 serde = { version = "1.0.143", features = ["derive"] }
 serde_json = "1.0.85"
@@ -109,7 +111,7 @@ dotenv = "0.15.0"
 helios-verifiable-api-server = { path = "verifiable-api/server" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-alloy = { version = "1.0.37", features = ["full"] }
+alloy = { version = "2.0.5", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 eyre = "0.6.8"
 dirs = "5.0.1"
