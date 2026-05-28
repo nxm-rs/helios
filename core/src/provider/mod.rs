@@ -34,6 +34,9 @@ pub mod status;
 pub mod value;
 pub mod verified;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::{FailureInfo, MismatchInfo, VerificationError};
 pub use event::{
     ConsensusStatus, HealthStatus, SecurityEvent, SkipReason, VerificationCounts,
