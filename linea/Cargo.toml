@@ -23,7 +23,7 @@ url = "2.5.0"
 reqwest.workspace = true
 
 helios-common = { path = "../common" }
-helios-core = { path = "../core" }
+helios-core = { path = "../core", default-features = false }
 helios-ethereum = { path = "../ethereum" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

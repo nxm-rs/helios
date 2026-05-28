@@ -34,8 +34,26 @@ thiserror.workspace = true
 url.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-jsonrpsee = { version = "0.19.0", features = ["full"] }
-openssl.workspace = true
+# Gated behind the `jsonrpc-server` feature (default on). Library
+# consumers that embed helios in-process do not expose a JSON-RPC
+# server and can opt out via `default-features = false`, which drops
+# jsonrpsee 0.19 and its old TLS/HTTP/openssl chain entirely.
+jsonrpsee = { version = "0.19.0", features = ["full"], optional = true }
+# Forced into the build to pin every transitive openssl consumer to
+# the vendored variant. The only transitive consumer in helios is
+# jsonrpsee 0.19's native-tls WS client, so this stays paired with
+# `jsonrpc-server` — when the server is disabled, openssl drops out
+# of the build entirely.
+openssl = { workspace = true, optional = true }
+
+[features]
+default = ["jsonrpc-server"]
+# Exposes `helios_core::jsonrpc::start` and the
+# `From<ClientError> for jsonrpsee::core::Error` conversion. Pulls
+# `jsonrpsee 0.19` and (on non-wasm) `openssl` with the `vendored`
+# feature. Disable in library-style consumers that don't need to
+# serve JSON-RPC over a socket.
+jsonrpc-server = ["dep:jsonrpsee", "dep:openssl"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.33"

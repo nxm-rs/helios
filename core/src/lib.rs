@@ -4,5 +4,5 @@ pub mod errors;
 pub mod execution;
 pub mod time;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "jsonrpc-server"))]
 pub mod jsonrpc;

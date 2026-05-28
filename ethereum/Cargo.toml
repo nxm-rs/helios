@@ -38,7 +38,7 @@ typenum.workspace = true
 
 # self crates
 helios-common = { path = "../common" }
-helios-core = { path = "../core" }
+helios-core = { path = "../core", default-features = false }
 helios-consensus-core = { path = "consensus-core" }
 helios-revm-utils = { path = "../revm-utils"  }
 
@@ -47,7 +47,6 @@ wasm-bindgen-futures = "0.4.37"
 getrandom = { version = "0.3.1", features = ["wasm_js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-openssl.workspace = true
 dirs = "5.0.1"
 
 [target.wasm32-unknown-unknown.dependencies]

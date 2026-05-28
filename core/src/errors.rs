@@ -30,7 +30,7 @@ impl From<ExecutionError> for ClientError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "jsonrpc-server"))]
 impl From<ClientError> for jsonrpsee::core::Error {
     fn from(value: ClientError) -> Self {
         jsonrpsee::core::Error::Custom(value.to_string())

@@ -10,6 +10,6 @@ serde_json.workspace = true
 
 # self crates
 helios-common = { path = "../../common" }
-helios-core = { path = "../../core" }
+helios-core = { path = "../../core", default-features = false }
 helios-ethereum = { path = "../../ethereum" }
 helios-verifiable-api-types = { path = "../../verifiable-api/types" }
