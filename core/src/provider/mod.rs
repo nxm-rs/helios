@@ -1,16 +1,11 @@
 //! Alloy [`Provider<N>`]-compatible read surface for helios.
 //!
-//! This module exposes [`VerifiedHeliosProvider<N>`] — a drop-in
+//! [`VerifiedHeliosProvider<N>`] is a drop-in
 //! `alloy::providers::Provider<N>` whose read methods block until
-//! consensus-anchored verification has succeeded. Methods that helios
-//! cannot meaningfully verify (gas estimators, fee history,
-//! `block_number` at tip) return [`Unverifiable<T>`] from inherent
-//! methods, forcing the caller to acknowledge they are trusting the RPC
-//! at that call site.
-//!
-//! The optimistic-first companion (`OptimisticHeliosProvider`),
-//! per-screen [`scope`]-based barriers, and the [`Routing`] enum land in
-//! Phase 2 — see issue #15 for the full design.
+//! consensus-anchored verification has succeeded. Methods that cannot be
+//! backed by consensus proofs (gas estimators, fee history, `block_number`
+//! at tip) return [`Unverifiable<T>`] from inherent methods, forcing the
+//! caller to acknowledge at the call site that they are trusting the RPC.
 //!
 //! ## Channel layout
 //!
@@ -27,14 +22,11 @@
 //!
 //! The load-bearing security invariant: `HealthStatus::Tainted` flips
 //! synchronously on the first mismatch, *before* the security_events
-//! queue. This means the trust signal cannot be lost regardless of
-//! event-stream backpressure — late or slow consumers of `health()` still
-//! observe the tainted state correctly.
+//! queue. The trust signal cannot be lost to backpressure — late or slow
+//! consumers of `health()` still observe the tainted state correctly.
 //!
 //! [`Provider<N>`]: alloy::providers::Provider
 //! [`Unverifiable<T>`]: value::Unverifiable
-//! [`scope`]: VerificationStatus
-//! [`Routing`]: VerifiedHeliosProvider
 
 pub mod error;
 pub mod event;

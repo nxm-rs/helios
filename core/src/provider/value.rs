@@ -2,15 +2,13 @@
 //!
 //! [`VerifiedValue`] is the typed payload of a successful background
 //! verification — emitted on the `events_verbose` channel so consumers
-//! that persist verified state (e.g. a wallet's `LastKnownStore`) don't
-//! have to re-issue the call to learn what was proven.
+//! that persist verified state don't have to re-issue the call to learn
+//! what was proven.
 //!
-//! [`Unverifiable<T>`] wraps the return of methods helios cannot
-//! meaningfully verify (gas estimators, fee history, `block_number` at
+//! [`Unverifiable<T>`] wraps the return of methods that cannot be backed
+//! by consensus proofs (gas estimators, fee history, `block_number` at
 //! tip). Forcing the caller to call `into_inner()` makes "I'm trusting
 //! the RPC for this" syntactically visible.
-//!
-//! See issue #15 for the design.
 
 use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Bytes, Log, B256, U256};
@@ -20,8 +18,7 @@ use helios_common::network_spec::NetworkSpec;
 /// Verified payload from a background verification, attached to a
 /// `VerificationEvent::Verified`.
 ///
-/// One variant per bucket-A method (see issue #15). Marked
-/// `#[non_exhaustive]` so adding variants in minor releases is
+/// Marked `#[non_exhaustive]` so adding variants in minor releases is
 /// non-breaking. Large variants are boxed to keep the enum's stack
 /// footprint bounded.
 #[non_exhaustive]
