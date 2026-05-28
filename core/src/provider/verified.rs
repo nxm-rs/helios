@@ -80,11 +80,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
     }
 
     /// Block until the verified-receipt for this tx hash is observed.
-    ///
-    /// Companion to the alloy-standard `send_raw_transaction` (which
-    /// returns the tx hash immediately on broadcast). The post-broadcast
-    /// receipt poll lives here so the `Provider<N>` method's semantics
-    /// match alloy's.
+    /// Wrap in [`tokio::time::timeout`] for a bounded wait.
     pub async fn verified_receipt(
         &self,
         hash: TxHash,
@@ -94,18 +90,6 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                 return Ok(r);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-
-    /// Time-bounded variant of [`Self::verified_receipt`].
-    pub async fn verified_receipt_with_timeout(
-        &self,
-        hash: TxHash,
-        timeout: Duration,
-    ) -> Result<N::ReceiptResponse, VerificationError> {
-        match tokio::time::timeout(timeout, self.verified_receipt(hash)).await {
-            Ok(r) => r,
-            Err(_) => Err(VerificationError::Timeout { still_pending: 1 }),
         }
     }
 
@@ -227,7 +211,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                     error: err.to_string().into_boxed_str(),
                     at: Instant::now(),
                 };
-                handle.record_failed(info.clone()).await;
+                handle.record_failed(info.clone());
                 Err(VerificationError::Failed { calls: vec![info] })
             }
         }
@@ -271,7 +255,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                     error: err.to_string().into_boxed_str(),
                     at: Instant::now(),
                 };
-                handle.record_failed(info.clone()).await;
+                handle.record_failed(info.clone());
                 Err(VerificationError::Failed { calls: vec![info] })
             }
         }

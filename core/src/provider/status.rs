@@ -16,12 +16,7 @@ use crate::provider::event::{
     VerifiedSnapshot,
 };
 
-/// `security_events` uses producer-backpressure — a small buffer is
-/// intentional so a slow consumer makes the verifier task await rather
-/// than racing ahead.
 const SECURITY_EVENT_BUF: usize = 64;
-/// `events_verbose` uses drop-oldest — the buffer can be larger because
-/// dropping is acceptable for informational events.
 const VERBOSE_EVENT_BUF: usize = 1024;
 
 /// Handle for observing and gating on the verification activity of a
@@ -49,9 +44,6 @@ pub(crate) struct Inner<N: NetworkSpec> {
     verbose_tx: broadcast::Sender<VerificationEvent<N>>,
 
     next_id: AtomicU64,
-    /// Per-request settlement channels. The `watch::Sender` lives here
-    /// until the request settles; barrier waiters subscribe via the
-    /// sender so they observe the outcome even if they raced the settle.
     pending: Mutex<HashMap<u64, watch::Sender<Option<RequestOutcome>>>>,
 }
 
@@ -63,7 +55,6 @@ enum RequestOutcome {
     Verified,
     Failed(FailureInfo),
     /// The [`PendingHandle`] was dropped without explicit resolution.
-    /// Treated as a no-op by `barrier` — neither verified nor a failure.
     Cancelled,
 }
 
@@ -97,78 +88,104 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// Latest-value snapshot of the verification counters.
     ///
     /// `Receiver::changed` resumes on every counter update; for a UI
-    /// rendering at 60 fps the recommended pattern is to debounce
-    /// (`sleep(16ms)` after each `changed().await`) to coalesce bursts.
+    /// rendering at frame rate the recommended pattern is to debounce
+    /// after each `changed().await` to coalesce bursts.
     pub fn counts(&self) -> watch::Receiver<VerificationCounts> {
         self.inner.counts_rx.clone()
     }
 
-    /// Sticky terminal-state of the provider. `Tainted` and `Stalled`
-    /// survive late subscribers — joining after the event observes the
-    /// current state immediately.
-    ///
-    /// This is the load-bearing security signal: `HealthStatus::Tainted`
-    /// is flipped synchronously on the first mismatch, *before* the
-    /// security_events queue, so the trust state cannot be lost
-    /// regardless of event-stream backpressure.
+    /// Sticky terminal-state of the provider. `Stalled` survives late
+    /// subscribers — joining after the transition observes the current
+    /// state immediately.
     pub fn health(&self) -> watch::Receiver<HealthStatus> {
         self.inner.health_rx.clone()
     }
 
     /// Consensus client state — tip, head age, checkpoint. Separated from
     /// `counts()` because consensus advances on every slot regardless of
-    /// verification activity; the wallet's "head 18 s old" indicator
-    /// shouldn't be coupled to the verification counters.
+    /// verification activity; a "head 18 s old" indicator shouldn't be
+    /// coupled to the verification counters.
     pub fn consensus_status(&self) -> watch::Receiver<ConsensusStatus> {
         self.inner.consensus_rx.clone()
     }
 
-    /// Producer-backpressured event channel for `Mismatch` / `Failed`.
-    ///
-    /// Only one consumer can hold the receiver at a time — security events
-    /// are critical and we don't want multiple subscribers racing. The
-    /// recommended pattern is for the embedding application to take it
-    /// once at startup and fan-out internally if multiple consumers need
-    /// it.
+    /// Bounded `mpsc::Receiver<SecurityEvent>`. Phase 1 publishes via
+    /// `try_send`, so events past the buffer capacity are dropped rather
+    /// than blocking the producer. Take it once at startup and fan out
+    /// internally if multiple consumers need it.
     ///
     /// Returns `None` if the receiver has already been taken.
     pub fn take_security_events(&self) -> Option<mpsc::Receiver<SecurityEvent>> {
         self.inner.security_rx.lock().take()
     }
 
-    /// Drop-oldest broadcast for informational events (Verified, Skipped,
-    /// Dropped). `RecvError::Lagged(n)` should be translated by callers
-    /// into the synthetic `VerificationEvent::Dropped { count: n }`
-    /// payload when forwarded across a language boundary.
+    /// Drop-oldest broadcast for informational events. Subscribe **before**
+    /// issuing verified calls if you need to capture early events — events
+    /// emitted while no subscribers are attached are dropped silently
+    /// (the broadcast channel only synthesises `Lagged(n)` for receivers
+    /// that exist and fall behind). Callers should translate
+    /// `RecvError::Lagged(n)` into a synthetic
+    /// [`VerificationEvent::Dropped`] when forwarding across a language
+    /// boundary.
     pub fn events_verbose(&self) -> broadcast::Receiver<VerificationEvent<N>> {
         self.inner.verbose_tx.subscribe()
     }
 
     /// Sign-gating barrier: capture the request-ids currently in `pending`
     /// state at this moment, and resolve when every one of them has
-    /// settled (Verified, Mismatched, or Failed).
-    ///
-    /// **Calls landing after barrier creation are not waited for** —
-    /// otherwise a chatty UI keeps the barrier open forever. The returned
-    /// `VerifiedSnapshot` carries the consensus tip at which the wait
-    /// succeeded; signing code can refuse if the snapshot is stale by the
-    /// time signing finishes.
+    /// settled. Calls landing after barrier creation are not waited for.
     ///
     /// Use [`Self::barrier_with_timeout`] in production — an unresponsive
-    /// consensus client could otherwise leave this future pending
-    /// indefinitely.
+    /// helios path could otherwise leave this future pending indefinitely.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
-        // Atomic snapshot: the lock serialises us against `_settle`, so
-        // every id in `receivers` either is still pending now (we'll get
-        // notified) or has already settled and pushed its outcome
-        // through the `watch::Sender` we subscribed to.
-        let receivers: Vec<watch::Receiver<Option<RequestOutcome>>> = {
-            let pending = self.inner.pending.lock();
-            pending.values().map(watch::Sender::subscribe).collect()
-        };
-
+        let receivers = self.snapshot_receivers();
         let mut failures = Vec::new();
+        let mut settled = 0usize;
+        Self::drain_receivers(receivers, &mut failures, &mut settled).await;
+        self.finish_barrier(failures)
+    }
 
+    /// Time-bounded variant of [`Self::barrier`]. On timeout, reports the
+    /// number of the barrier's snapshot ids that hadn't settled yet — not
+    /// the unrelated global pending count.
+    pub async fn barrier_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<VerifiedSnapshot, VerificationError> {
+        let receivers = self.snapshot_receivers();
+        let snapshot_len = receivers.len();
+        let mut failures = Vec::new();
+        let mut settled = 0usize;
+
+        let drained = tokio::time::timeout(
+            timeout,
+            Self::drain_receivers(receivers, &mut failures, &mut settled),
+        )
+        .await
+        .is_ok();
+
+        if !drained {
+            return Err(VerificationError::Timeout {
+                still_pending: snapshot_len.saturating_sub(settled),
+            });
+        }
+        self.finish_barrier(failures)
+    }
+
+    fn snapshot_receivers(&self) -> Vec<watch::Receiver<Option<RequestOutcome>>> {
+        // Hold the lock for the snapshot only — `_settle` is serialised
+        // against us, so every id either is still pending now (we'll get
+        // notified) or has already pushed its outcome through the
+        // `watch::Sender` we subscribed to.
+        let pending = self.inner.pending.lock();
+        pending.values().map(watch::Sender::subscribe).collect()
+    }
+
+    async fn drain_receivers(
+        receivers: Vec<watch::Receiver<Option<RequestOutcome>>>,
+        failures: &mut Vec<FailureInfo>,
+        settled: &mut usize,
+    ) {
         for mut rx in receivers {
             loop {
                 if let Some(outcome) = rx.borrow().clone() {
@@ -176,18 +193,25 @@ impl<N: NetworkSpec> VerificationStatus<N> {
                         RequestOutcome::Verified | RequestOutcome::Cancelled => {}
                         RequestOutcome::Failed(info) => failures.push(info),
                     }
+                    *settled += 1;
                     break;
                 }
                 if rx.changed().await.is_err() {
+                    // Sender dropped without a settle — treat as cancelled.
+                    *settled += 1;
                     break;
                 }
             }
         }
+    }
 
+    fn finish_barrier(
+        &self,
+        failures: Vec<FailureInfo>,
+    ) -> Result<VerifiedSnapshot, VerificationError> {
         if !failures.is_empty() {
             return Err(VerificationError::Failed { calls: failures });
         }
-
         let consensus = self.inner.consensus_rx.borrow().clone();
         Ok(VerifiedSnapshot {
             consensus_tip: consensus.tip,
@@ -196,31 +220,12 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         })
     }
 
-    /// Time-bounded variant of [`Self::barrier`].
-    pub async fn barrier_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<VerifiedSnapshot, VerificationError> {
-        match tokio::time::timeout(timeout, self.barrier()).await {
-            Ok(r) => r,
-            Err(_) => Err(VerificationError::Timeout {
-                still_pending: self.inner.pending.lock().len(),
-            }),
-        }
-    }
-
-    /// Clear taint after a mismatch has been observed.
-    pub fn acknowledge_mismatch(&self) {
-        self.inner
-            .health_tx
-            .send_modify(|s| *s = HealthStatus::default());
-    }
-
     /// Allocate a request id, register a settlement channel, and bump the
     /// pending counter. The returned [`PendingHandle`] must be resolved by
-    /// calling one of `record_verified` / `record_mismatch` /
-    /// `record_failed`; dropping it without resolution counts as
-    /// `Cancelled` (the slot is released, but no outcome counter ticks).
+    /// calling [`PendingHandle::record_verified`] or
+    /// [`PendingHandle::record_failed`]; dropping it without resolution
+    /// counts as `Cancelled` — the slot is released but no outcome
+    /// counter ticks.
     pub(crate) fn _bump_pending(&self) -> PendingHandle<N> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, _) = watch::channel(None);
@@ -256,12 +261,17 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     }
 
     /// Producer side: update consensus status. Called by the consensus
-    /// supervisor on each tip advance. Public so the supervisor (which
-    /// lives in network-specific crates like `helios-ethereum`) can drive
-    /// it; not part of the consumer-facing surface.
+    /// supervisor on each tip advance.
     #[doc(hidden)]
     pub fn _set_consensus_status(&self, status: ConsensusStatus) {
         let _ = self.inner.consensus_tx.send(status);
+    }
+
+    /// Producer side: set health status. Called by the consensus
+    /// supervisor when stall thresholds trip or recover.
+    #[doc(hidden)]
+    pub fn _set_health(&self, health: HealthStatus) {
+        let _ = self.inner.health_tx.send(health);
     }
 }
 
@@ -273,10 +283,10 @@ impl<N: NetworkSpec> Default for VerificationStatus<N> {
 
 /// RAII handle returned by [`VerificationStatus::_bump_pending`].
 ///
-/// Must be resolved via [`Self::record_verified`], [`Self::record_mismatch`],
-/// or [`Self::record_failed`]. Dropping without resolution releases the
-/// pending slot but does not tick any outcome counter — used for
-/// cancelled-by-caller paths (e.g. future dropped mid-RPC).
+/// Must be resolved via [`Self::record_verified`] or [`Self::record_failed`].
+/// Dropping without resolution releases the pending slot but does not
+/// tick any outcome counter — used for cancelled-by-caller paths (e.g.
+/// future dropped mid-RPC).
 #[must_use = "PendingHandle should be explicitly resolved or dropped"]
 pub(crate) struct PendingHandle<N: NetworkSpec> {
     id: u64,
@@ -295,7 +305,12 @@ impl<N: NetworkSpec> PendingHandle<N> {
         self.status.settle(self.id, RequestOutcome::Verified);
     }
 
-    pub(crate) async fn record_failed(mut self, info: FailureInfo) {
+    /// Resolves the handle and publishes a [`SecurityEvent::Failed`].
+    /// Synchronous so the publish is not cancellable — if the surrounding
+    /// future is dropped, the event still reaches the channel (or is
+    /// dropped immediately on a full channel; never silently lost to
+    /// cancellation between the counter update and the publish).
+    pub(crate) fn record_failed(mut self, info: FailureInfo) {
         self.resolved = true;
         self.status.inner.counts_tx.send_modify(|c| {
             c.pending = c.pending.saturating_sub(1);
@@ -308,8 +323,7 @@ impl<N: NetworkSpec> PendingHandle<N> {
             .status
             .inner
             .security_tx
-            .send(SecurityEvent::Failed(info))
-            .await;
+            .try_send(SecurityEvent::Failed(info));
     }
 }
 
