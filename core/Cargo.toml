@@ -26,6 +26,9 @@ serde_json.workspace = true
 # cache
 schnellru = "0.2"
 
+# sync
+parking_lot = "0.12.2"
+
 # misc
 eyre.workspace = true
 hex.workspace = true
@@ -60,9 +63,6 @@ wasm-bindgen-futures = "0.4.33"
 wasmtimer.workspace = true
 getrandom = { version = "0.3.1", features = ["wasm_js"] }
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
-
-[target.wasm32-unknown-unknown.dependencies]
-parking_lot = { version = "0.12.2" }
 
 [dev-dependencies]
 helios-test-utils = { path = "../tests/test-utils" }
