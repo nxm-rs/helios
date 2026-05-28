@@ -1,8 +1,5 @@
 //! [`VerificationStatus`] — the public handle for observing and gating on
 //! verification activity.
-//!
-//! See issue #15 (sections 3 and 4) for the design and channel-split
-//! rationale.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +25,7 @@ const SECURITY_EVENT_BUF: usize = 64;
 const VERBOSE_EVENT_BUF: usize = 1024;
 
 /// Handle for observing and gating on the verification activity of a
-/// [`super::VerifiedHeliosProvider`] (or, in Phase 2, an
-/// `OptimisticHeliosProvider`).
+/// [`super::VerifiedHeliosProvider`].
 ///
 /// Cheap to clone — internally just an `Arc<Inner>`.
 #[derive(Clone)]
@@ -142,10 +138,7 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// consensus client could otherwise leave this future pending
     /// indefinitely.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
-        // Phase 1 scaffold: barrier wiring lands with the verifier-task
-        // implementation. For now, return a snapshot with zeroed fields
-        // (the surface compiles; tests will gate on real implementation).
-        todo!("phase 1: implement barrier via per-request oneshot::Receiver fan-in")
+        todo!()
     }
 
     /// Time-bounded variant of [`Self::barrier`].
@@ -153,15 +146,11 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         &self,
         _timeout: Duration,
     ) -> Result<VerifiedSnapshot, VerificationError> {
-        todo!("phase 1: implement barrier_with_timeout")
+        todo!()
     }
 
     /// Clear taint after a mismatch has been observed.
-    ///
-    /// In-memory only by default; persistence depends on `TaintConfig`
-    /// (Phase 2).
     pub fn acknowledge_mismatch(&self) {
-        // Phase 1 scaffold.
         self.inner
             .health_tx
             .send_modify(|s| *s = HealthStatus::default());

@@ -1,7 +1,4 @@
-//! Verification-failure error type for the [`VerifiedHeliosProvider`] and
-//! [`OptimisticHeliosProvider`] surface.
-//!
-//! See issue #15 for the design.
+//! Error type returned by verified-path operations.
 
 use std::time::Instant;
 
