@@ -206,11 +206,11 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         M: FnOnce(&T) -> VerifiedValue<N>,
     {
         let started = Instant::now();
-        self.inner.status._bump_pending();
+        let handle = self.inner.status._bump_pending();
         match call(self.inner.helios.clone()).await {
             Ok(value) => {
                 let took = started.elapsed();
-                self.inner.status._record_verified();
+                handle.record_verified();
                 self.inner
                     .status
                     ._emit_verbose_with(|| VerificationEvent::Verified {
@@ -226,7 +226,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                     error: err.to_string().into_boxed_str(),
                     at: Instant::now(),
                 };
-                self.inner.status._record_failed(info.clone()).await;
+                handle.record_failed(info.clone()).await;
                 Err(VerificationError::Failed { calls: vec![info] })
             }
         }
@@ -246,11 +246,11 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         M: FnOnce(&T) -> VerifiedValue<N>,
     {
         let started = Instant::now();
-        self.inner.status._bump_pending();
+        let handle = self.inner.status._bump_pending();
         match call(self.inner.helios.clone()).await {
             Ok(Some(value)) => {
                 let took = started.elapsed();
-                self.inner.status._record_verified();
+                handle.record_verified();
                 self.inner
                     .status
                     ._emit_verbose_with(|| VerificationEvent::Verified {
@@ -261,7 +261,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                 Ok(Some(value))
             }
             Ok(None) => {
-                self.inner.status._record_verified();
+                handle.record_verified();
                 Ok(None)
             }
             Err(err) => {
@@ -270,7 +270,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
                     error: err.to_string().into_boxed_str(),
                     at: Instant::now(),
                 };
-                self.inner.status._record_failed(info.clone()).await;
+                handle.record_failed(info.clone()).await;
                 Err(VerificationError::Failed { calls: vec![info] })
             }
         }
