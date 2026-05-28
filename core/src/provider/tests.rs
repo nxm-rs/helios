@@ -413,3 +413,38 @@ async fn dropping_pending_handle_releases_slot() {
     assert_eq!(counts.failed, 0);
 }
 
+#[tokio::test]
+async fn caller_cancellation_releases_pending_slot() {
+    // Mock awaits a notify before returning, so the verified call hangs
+    // at the helios.get_balance().await — i.e., before record_verified
+    // or record_failed runs. Cancelling the outer future via timeout
+    // exercises the PendingHandle Drop path: the slot must be released
+    // with no outcome counter ticked.
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_for_mock = release.clone();
+    let mock = MockHelios {
+        get_balance_fn: Box::new(move |_, _| {
+            let release = release_for_mock.clone();
+            async move {
+                release.notified().await;
+                Ok(U256::ZERO)
+            }
+            .boxed()
+        }),
+        ..Default::default()
+    };
+    let provider = build_provider(mock);
+    let status = provider.verification_status().clone();
+
+    let res = tokio::time::timeout(Duration::from_millis(50), provider.balance_verified(addr(22)))
+        .await;
+    assert!(res.is_err(), "outer timeout should fire");
+
+    let counts = status.counts().borrow().clone();
+    assert_eq!(counts.pending, 0, "Drop path must release the slot");
+    assert_eq!(counts.failed, 0);
+    assert_eq!(counts.verified, 0);
+
+    release.notify_one();
+}
+

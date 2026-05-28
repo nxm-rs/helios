@@ -1,17 +1,13 @@
 //! Event / state types emitted by the provider's verification machinery.
 //!
-//! Three channels, by design:
-//!
 //! - [`VerificationCounts`] is delivered via `watch` — latest-value
-//!   semantics, cheap to poll at frame rate (Flutter / RN UIs).
-//! - [`HealthStatus`] is also `watch` — sticky terminal state for
-//!   `Tainted` / `Stalled`. `Tainted` flips synchronously on the first
-//!   mismatch, before the security_events queue, so the trust signal
-//!   cannot be lost regardless of event-stream backpressure. This is the
-//!   load-bearing security invariant.
-//! - [`SecurityEvent`] is delivered via bounded `mpsc` with
-//!   producer-backpressure — the verifier task awaits if the consumer is
-//!   slow, never drops a security event.
+//!   semantics, cheap to poll at frame rate.
+//! - [`HealthStatus`] is also `watch` — sticky terminal state. Late
+//!   subscribers observe the current value immediately.
+//! - [`SecurityEvent`] is delivered via bounded `mpsc`. The Phase 1
+//!   verifier publishes via `try_send`, so events are dropped when the
+//!   consumer is too slow rather than blocking the producer; a full
+//!   producer-backpressure design lands with the optimistic provider.
 //! - [`VerificationEvent`] is delivered via `broadcast` (drop-oldest) —
 //!   informational chatter where lossy is acceptable.
 
@@ -19,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use helios_common::network_spec::NetworkSpec;
 
-use crate::provider::error::{FailureInfo, MismatchInfo};
+use crate::provider::error::FailureInfo;
 use crate::provider::value::VerifiedValue;
 
 /// Counters for verification activity, delivered via `watch::Receiver`.
@@ -27,15 +23,11 @@ use crate::provider::value::VerifiedValue;
 pub struct VerificationCounts {
     pub pending: usize,
     pub verified: usize,
-    pub mismatched: usize,
     pub failed: usize,
     pub last_change_at: Option<Instant>,
 }
 
 /// Sticky terminal state of the provider, delivered via `watch::Receiver`.
-///
-/// Late subscribers see current state immediately (e.g. `Tainted` survives
-/// even if the subscriber joined after the mismatch).
 #[derive(Debug, Clone, Default)]
 pub enum HealthStatus {
     #[default]
@@ -48,23 +40,11 @@ pub enum HealthStatus {
         since: Instant,
         restart_attempts: u32,
     },
-    /// At least one mismatch has been observed against the configured
-    /// execution RPC for this `(execution_rpc_url, chain_id)`. Cleared via
-    /// `VerificationStatus::acknowledge_mismatch`.
-    Tainted {
-        first_mismatch: Box<MismatchInfo>,
-    },
 }
 
-/// Security-critical events. Delivered via bounded
-/// `mpsc::Receiver<SecurityEvent>` with producer-backpressure semantics —
-/// the verifier task awaits if the consumer is slow, never drops.
-///
-/// The actual trust signal lives on [`HealthStatus`]; this channel carries
-/// the diagnostic detail (which call, which values).
+/// Security-critical events. Delivered via bounded `mpsc::Receiver`.
 #[derive(Debug, Clone)]
 pub enum SecurityEvent {
-    Mismatch(MismatchInfo),
     Failed(FailureInfo),
 }
 
@@ -86,8 +66,7 @@ pub enum VerificationEvent<N: NetworkSpec> {
         reason: SkipReason,
     },
     /// Synthetic event indicating the consumer fell behind and missed
-    /// `count` informational events. Security events are never dropped, so
-    /// this never indicates a missed `SecurityEvent`.
+    /// `count` informational events.
     Dropped {
         count: u64,
     },
