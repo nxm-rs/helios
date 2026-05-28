@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, BlockHash, Bytes, TxHash, B256, U256};
-use alloy::providers::{Provider, RootProvider};
+use alloy::primitives::{Address, BlockHash, Bytes, TxHash, B256, U256, U64};
+use alloy::providers::{Provider, ProviderCall, RootProvider, RpcWithBlock};
 use alloy::rpc::types::{Filter, Log};
+use alloy::transports::{TransportErrorKind, TransportResult};
 use helios_common::network_spec::NetworkSpec;
 
 use crate::client::api::HeliosApi;
@@ -277,13 +278,113 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
     }
 }
 
-// Only `root()` has no default impl on alloy's `Provider<N>` trait —
-// every other method has a default that calls through `client()` (which
-// defaults to `self.root().client()`). Providing `root()` here wires the
-// type in as a `Provider<N>`; verified-blocking overrides for individual
-// methods are added one at a time and replace the alloy default.
+// The alloy `Provider<N>` trait has default impls for every method
+// except `root()` — defaults call through `client()` which itself
+// defaults to `self.root().client()`. Methods we override below replace
+// the alloy default and route through the helios verified path;
+// methods we don't override forward to the unverified RPC via `root()`.
+// Builder methods (`get_balance` -> `RpcWithBlock`, etc.) honour the
+// caller's `.block_id(...)` selection by deferring the verified call
+// until the builder is awaited.
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
     fn root(&self) -> &RootProvider<N> {
         &self.inner.root
+    }
+
+    fn get_balance(&self, address: Address) -> RpcWithBlock<Address, U256, U256> {
+        let provider = self.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                provider
+                    .run_verified(
+                        "eth_getBalance",
+                        |h| async move { h.get_balance(address, block_id).await },
+                        |v| VerifiedValue::Balance(*v),
+                    )
+                    .await
+                    .map_err(TransportErrorKind::custom)
+            }))
+        })
+    }
+
+    fn get_transaction_count(
+        &self,
+        address: Address,
+    ) -> RpcWithBlock<Address, U64, u64, fn(U64) -> u64> {
+        let provider = self.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                provider
+                    .run_verified(
+                        "eth_getTransactionCount",
+                        |h| async move { h.get_nonce(address, block_id).await },
+                        |v| VerifiedValue::Nonce(*v),
+                    )
+                    .await
+                    .map_err(TransportErrorKind::custom)
+            }))
+        })
+    }
+
+    fn get_code_at(&self, address: Address) -> RpcWithBlock<Address, Bytes> {
+        let provider = self.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                provider
+                    .run_verified(
+                        "eth_getCode",
+                        |h| async move { h.get_code(address, block_id).await },
+                        |v| VerifiedValue::Code(v.clone()),
+                    )
+                    .await
+                    .map_err(TransportErrorKind::custom)
+            }))
+        })
+    }
+
+    fn get_storage_at(
+        &self,
+        address: Address,
+        key: U256,
+    ) -> RpcWithBlock<(Address, U256), U256> {
+        let provider = self.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                provider
+                    .run_verified(
+                        "eth_getStorageAt",
+                        |h| async move { h.get_storage_at(address, key, block_id).await },
+                        |v| VerifiedValue::StorageSlot(*v),
+                    )
+                    .await
+                    .map(|b| U256::from_be_bytes(b.0))
+                    .map_err(TransportErrorKind::custom)
+            }))
+        })
+    }
+
+    async fn get_logs(&self, filter: &Filter) -> TransportResult<Vec<Log>> {
+        self.logs_verified(filter)
+            .await
+            .map_err(TransportErrorKind::custom)
+    }
+
+    fn get_transaction_receipt(
+        &self,
+        hash: TxHash,
+    ) -> ProviderCall<(TxHash,), Option<N::ReceiptResponse>> {
+        let provider = self.clone();
+        ProviderCall::BoxedFuture(Box::pin(async move {
+            provider
+                .transaction_receipt_verified(hash)
+                .await
+                .map_err(TransportErrorKind::custom)
+        }))
     }
 }
