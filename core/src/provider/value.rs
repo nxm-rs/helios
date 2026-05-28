@@ -11,8 +11,8 @@
 //! the RPC for this" syntactically visible.
 
 use alloy::eips::eip2930::AccessList;
-use alloy::primitives::{Bytes, Log, B256, U256};
-use alloy::rpc::types::EIP1186AccountProofResponse;
+use alloy::primitives::{Bytes, B256, U256};
+use alloy::rpc::types::{EIP1186AccountProofResponse, Log};
 use helios_common::network_spec::NetworkSpec;
 
 /// Verified payload from a background verification, attached to a

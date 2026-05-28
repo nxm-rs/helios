@@ -9,16 +9,19 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockHash, Bytes, TxHash, B256, U256};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Filter, Log};
 use helios_common::network_spec::NetworkSpec;
 
 use crate::client::api::HeliosApi;
-use crate::provider::error::VerificationError;
+use crate::provider::error::{FailureInfo, VerificationError};
+use crate::provider::event::VerificationEvent;
 use crate::provider::status::VerificationStatus;
+use crate::provider::value::VerifiedValue;
 
 /// Verified-blocking helios provider — drop-in `alloy::providers::Provider<N>`.
 ///
@@ -37,13 +40,10 @@ pub struct VerifiedHeliosProvider<N: NetworkSpec> {
 }
 
 pub(crate) struct Inner<N: NetworkSpec> {
-    /// The verified-path delegate.
     helios: Arc<dyn HeliosApi<N>>,
     /// The forwarded-path delegate. Default `Provider<N>` method impls go
     /// through this for methods we don't override.
     root: RootProvider<N>,
-    /// Shared verification-status handle. Wired into the verifier tasks
-    /// the provider spawns per call.
     status: VerificationStatus<N>,
     _network: PhantomData<N>,
 }
@@ -86,65 +86,194 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
     /// match alloy's.
     pub async fn verified_receipt(
         &self,
-        _hash: TxHash,
+        hash: TxHash,
     ) -> Result<N::ReceiptResponse, VerificationError> {
-        todo!()
+        loop {
+            if let Some(r) = self.transaction_receipt_verified(hash).await? {
+                return Ok(r);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// Time-bounded variant of [`Self::verified_receipt`].
     pub async fn verified_receipt_with_timeout(
         &self,
-        _hash: TxHash,
-        _timeout: Duration,
+        hash: TxHash,
+        timeout: Duration,
     ) -> Result<N::ReceiptResponse, VerificationError> {
-        todo!()
+        match tokio::time::timeout(timeout, self.verified_receipt(hash)).await {
+            Ok(r) => r,
+            Err(_) => Err(VerificationError::Timeout { still_pending: 1 }),
+        }
     }
 
     /// Verified balance at the current head.
-    pub async fn balance_verified(&self, _address: Address) -> Result<U256, VerificationError> {
-        todo!()
+    pub async fn balance_verified(&self, address: Address) -> Result<U256, VerificationError> {
+        self.run_verified(
+            "eth_getBalance",
+            |h| async move { h.get_balance(address, BlockId::latest()).await },
+            |v| VerifiedValue::Balance(*v),
+        )
+        .await
     }
 
     /// Verified nonce at the current head.
-    pub async fn nonce_verified(&self, _address: Address) -> Result<u64, VerificationError> {
-        todo!()
+    pub async fn nonce_verified(&self, address: Address) -> Result<u64, VerificationError> {
+        self.run_verified(
+            "eth_getTransactionCount",
+            |h| async move { h.get_nonce(address, BlockId::latest()).await },
+            |v| VerifiedValue::Nonce(*v),
+        )
+        .await
     }
 
     /// Verified code at the current head.
-    pub async fn code_verified(&self, _address: Address) -> Result<Bytes, VerificationError> {
-        todo!()
+    pub async fn code_verified(&self, address: Address) -> Result<Bytes, VerificationError> {
+        self.run_verified(
+            "eth_getCode",
+            |h| async move { h.get_code(address, BlockId::latest()).await },
+            |v| VerifiedValue::Code(v.clone()),
+        )
+        .await
     }
 
     /// Verified storage slot at the current head.
     pub async fn storage_verified(
         &self,
-        _address: Address,
-        _slot: U256,
+        address: Address,
+        slot: U256,
     ) -> Result<B256, VerificationError> {
-        todo!()
+        self.run_verified(
+            "eth_getStorageAt",
+            |h| async move { h.get_storage_at(address, slot, BlockId::latest()).await },
+            |v| VerifiedValue::StorageSlot(*v),
+        )
+        .await
     }
 
     /// Verified logs matching the filter.
-    pub async fn logs_verified(&self, _filter: &Filter) -> Result<Vec<Log>, VerificationError> {
-        todo!()
+    pub async fn logs_verified(&self, filter: &Filter) -> Result<Vec<Log>, VerificationError> {
+        let filter = filter.clone();
+        self.run_verified(
+            "eth_getLogs",
+            |h| async move { h.get_logs(&filter).await },
+            |v| VerifiedValue::Logs(v.clone()),
+        )
+        .await
     }
 
     /// Verified block by hash.
     pub async fn block_by_hash_verified(
         &self,
-        _hash: BlockHash,
-        _full_tx: bool,
+        hash: BlockHash,
+        full_tx: bool,
     ) -> Result<Option<N::BlockResponse>, VerificationError> {
-        todo!()
+        self.run_verified_opt(
+            "eth_getBlockByHash",
+            |h| async move { h.get_block(BlockId::Hash(hash.into()), full_tx).await },
+            |b| VerifiedValue::Block(Box::new(b.clone())),
+        )
+        .await
     }
 
     /// Verified transaction receipt by hash. Used internally by
     /// [`Self::verified_receipt`].
     pub async fn transaction_receipt_verified(
         &self,
-        _hash: TxHash,
+        hash: TxHash,
     ) -> Result<Option<N::ReceiptResponse>, VerificationError> {
-        todo!()
+        self.run_verified_opt(
+            "eth_getTransactionReceipt",
+            |h| async move { h.get_transaction_receipt(hash).await },
+            |r| VerifiedValue::Receipt(Box::new(r.clone())),
+        )
+        .await
+    }
+
+    /// Bump pending, await the verified-path call, record the outcome on
+    /// [`VerificationStatus`], and emit a `Verified` event on the verbose
+    /// channel when there are subscribers.
+    async fn run_verified<T, F, Fut, M>(
+        &self,
+        method: &'static str,
+        call: F,
+        make_value: M,
+    ) -> Result<T, VerificationError>
+    where
+        F: FnOnce(Arc<dyn HeliosApi<N>>) -> Fut,
+        Fut: std::future::Future<Output = eyre::Result<T>>,
+        M: FnOnce(&T) -> VerifiedValue<N>,
+    {
+        let started = Instant::now();
+        self.inner.status._bump_pending();
+        match call(self.inner.helios.clone()).await {
+            Ok(value) => {
+                let took = started.elapsed();
+                self.inner.status._record_verified();
+                self.inner
+                    .status
+                    ._emit_verbose_with(|| VerificationEvent::Verified {
+                        method,
+                        value: make_value(&value),
+                        took,
+                    });
+                Ok(value)
+            }
+            Err(err) => {
+                let info = FailureInfo {
+                    method,
+                    error: err.to_string().into_boxed_str(),
+                    at: Instant::now(),
+                };
+                self.inner.status._record_failed(info.clone()).await;
+                Err(VerificationError::Failed { calls: vec![info] })
+            }
+        }
+    }
+
+    /// `Option<T>`-returning sibling of [`Self::run_verified`]. The
+    /// `Verified` event only carries a payload for the `Some` case.
+    async fn run_verified_opt<T, F, Fut, M>(
+        &self,
+        method: &'static str,
+        call: F,
+        make_value: M,
+    ) -> Result<Option<T>, VerificationError>
+    where
+        F: FnOnce(Arc<dyn HeliosApi<N>>) -> Fut,
+        Fut: std::future::Future<Output = eyre::Result<Option<T>>>,
+        M: FnOnce(&T) -> VerifiedValue<N>,
+    {
+        let started = Instant::now();
+        self.inner.status._bump_pending();
+        match call(self.inner.helios.clone()).await {
+            Ok(Some(value)) => {
+                let took = started.elapsed();
+                self.inner.status._record_verified();
+                self.inner
+                    .status
+                    ._emit_verbose_with(|| VerificationEvent::Verified {
+                        method,
+                        value: make_value(&value),
+                        took,
+                    });
+                Ok(Some(value))
+            }
+            Ok(None) => {
+                self.inner.status._record_verified();
+                Ok(None)
+            }
+            Err(err) => {
+                let info = FailureInfo {
+                    method,
+                    error: err.to_string().into_boxed_str(),
+                    at: Instant::now(),
+                };
+                self.inner.status._record_failed(info.clone()).await;
+                Err(VerificationError::Failed { calls: vec![info] })
+            }
+        }
     }
 }
 
