@@ -68,7 +68,16 @@ futures = "0.3.23"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 
 # io
-reqwest = { version = "0.13.4", features = ["json", "gzip", "deflate", "zstd", "brotli", "hickory-dns"] }
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    "http2",
+    "default-tls",
+    "gzip",
+    "deflate",
+    "zstd",
+    "brotli",
+    "hickory-dns",
+] }
 # reqwest-middleware 0.5 split `query` out as an opt-in feature; the
 # verifiable-api client uses `.query(...)`, so we enable it explicitly.
 reqwest-middleware = { version = "0.5", features = ["json", "query"] }
