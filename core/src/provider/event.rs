@@ -36,8 +36,9 @@ pub struct VerificationCounts {
 ///
 /// Late subscribers see current state immediately (e.g. `Tainted` survives
 /// even if the subscriber joined after the mismatch).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum HealthStatus {
+    #[default]
     Healthy,
     /// Consensus client hasn't made progress for longer than the configured
     /// stall threshold. The library auto-retries up to a bounded number of
@@ -55,12 +56,6 @@ pub enum HealthStatus {
     },
 }
 
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self::Healthy
-    }
-}
-
 /// Security-critical events. Delivered via bounded
 /// `mpsc::Receiver<SecurityEvent>` with producer-backpressure semantics —
 /// the verifier task awaits if the consumer is slow, never drops.
@@ -76,6 +71,7 @@ pub enum SecurityEvent {
 /// Informational verification events. Delivered via
 /// `broadcast::Receiver<VerificationEvent>` with drop-oldest semantics —
 /// `RecvError::Lagged(n)` surfaces as a synthetic [`VerificationEvent::Dropped`].
+#[derive(Clone)]
 pub enum VerificationEvent<N: NetworkSpec> {
     /// A background verification completed successfully.
     Verified {
@@ -97,36 +93,19 @@ pub enum VerificationEvent<N: NetworkSpec> {
     },
 }
 
-// `VerifiedValue` is not `Clone` if `N::BlockResponse` etc. aren't, but
-// the broadcast channel needs the message to be `Clone`. For the scaffold
-// we just `impl Clone` manually so the types compose; later refinement
-// may demand `Clone` bounds on `N`'s associated types.
-impl<N: NetworkSpec> Clone for VerificationEvent<N> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Verified { method, value, took } => Self::Verified {
-                method,
-                value: value.clone(),
-                took: *took,
-            },
-            Self::Skipped { method, reason } => Self::Skipped {
-                method,
-                reason: reason.clone(),
-            },
-            Self::Dropped { count } => Self::Dropped { count: *count },
-        }
-    }
-}
-
 impl<N: NetworkSpec> std::fmt::Debug for VerificationEvent<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Verified { method, took, .. } => {
-                f.debug_struct("Verified").field("method", method).field("took", took).finish()
-            }
-            Self::Skipped { method, reason } => {
-                f.debug_struct("Skipped").field("method", method).field("reason", reason).finish()
-            }
+            Self::Verified { method, took, .. } => f
+                .debug_struct("Verified")
+                .field("method", method)
+                .field("took", took)
+                .finish(),
+            Self::Skipped { method, reason } => f
+                .debug_struct("Skipped")
+                .field("method", method)
+                .field("reason", reason)
+                .finish(),
             Self::Dropped { count } => f.debug_struct("Dropped").field("count", count).finish(),
         }
     }

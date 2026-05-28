@@ -50,9 +50,9 @@ pub(crate) struct Inner<N: NetworkSpec> {
 }
 
 impl<N: NetworkSpec> VerificationStatus<N> {
-    /// Construct a fresh, healthy status handle. Called by the provider's
-    /// builder during `build()`.
-    pub(crate) fn new() -> Self {
+    /// Construct a fresh, healthy status handle. Provider builders call
+    /// this to allocate the channels that the verifier tasks publish to.
+    pub fn new() -> Self {
         let (counts_tx, counts_rx) = watch::channel(VerificationCounts::default());
         let (health_tx, health_rx) = watch::channel(HealthStatus::default());
         let (consensus_tx, consensus_rx) = watch::channel(ConsensusStatus::default());
@@ -157,8 +157,7 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     }
 
     /// Producer side: bump pending count when a verification is
-    /// dispatched. Crate-private — only the provider's verifier task
-    /// should call this.
+    /// dispatched.
     pub(crate) fn _bump_pending(&self) {
         self.inner.counts_tx.send_modify(|c| {
             c.pending = c.pending.saturating_add(1);
@@ -214,9 +213,31 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         let _ = self.inner.verbose_tx.send(event);
     }
 
+    /// Like [`Self::_emit_verbose`], but the event is constructed lazily —
+    /// the closure runs only when there's at least one subscriber. Used
+    /// for `Verified` events whose payload requires cloning large network
+    /// types.
+    pub(crate) fn _emit_verbose_with<F>(&self, make: F)
+    where
+        F: FnOnce() -> VerificationEvent<N>,
+    {
+        if self.inner.verbose_tx.receiver_count() > 0 {
+            let _ = self.inner.verbose_tx.send(make());
+        }
+    }
+
     /// Producer side: update consensus status. Called by the consensus
-    /// supervisor on each tip advance.
-    pub(crate) fn _set_consensus_status(&self, status: ConsensusStatus) {
+    /// supervisor on each tip advance. Public so the supervisor (which
+    /// lives in network-specific crates like `helios-ethereum`) can drive
+    /// it; not part of the consumer-facing surface.
+    #[doc(hidden)]
+    pub fn _set_consensus_status(&self, status: ConsensusStatus) {
         let _ = self.inner.consensus_tx.send(status);
+    }
+}
+
+impl<N: NetworkSpec> Default for VerificationStatus<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
