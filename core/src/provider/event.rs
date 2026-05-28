@@ -14,8 +14,6 @@
 //!   slow, never drops a security event.
 //! - [`VerificationEvent`] is delivered via `broadcast` (drop-oldest) —
 //!   informational chatter where lossy is acceptable.
-//!
-//! See issue #15 for the design.
 
 use std::time::{Duration, Instant};
 
