@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, BlockHash, Bytes, TxHash, B256, U256, U64};
-use alloy::providers::{Provider, ProviderCall, RootProvider, RpcWithBlock};
-use alloy::rpc::types::{Filter, Log};
+use alloy::primitives::{Address, BlockHash, Bytes, StorageKey, TxHash, B256, U256, U64};
+use alloy::providers::{EthGetBlock, Provider, ProviderCall, RootProvider, RpcWithBlock};
+use alloy::rpc::types::{BlockTransactionsKind, EIP1186AccountProofResponse, Filter, Log};
 use alloy::transports::{TransportErrorKind, TransportResult};
 use helios_common::network_spec::NetworkSpec;
 
@@ -26,11 +26,19 @@ use crate::provider::value::VerifiedValue;
 
 /// Verified-blocking helios provider — drop-in `alloy::providers::Provider<N>`.
 ///
-/// Every method on the `Provider<N>` trait that helios can back returns
-/// only after consensus-anchored verification has succeeded. Methods that
-/// cannot be verified (gas estimators, fee history, `block_number` at
-/// tip) return [`Unverifiable<T>`] from inherent methods, forcing the
-/// caller to syntactically acknowledge they are trusting the RPC.
+/// Methods routed through helios verification:
+/// `get_balance`, `get_transaction_count`, `get_code_at`,
+/// `get_storage_at`, `get_logs`, `get_transaction_receipt`,
+/// `get_block`, `get_block_by_hash`, `get_proof`,
+/// `get_transaction_by_hash`, `get_block_receipts`.
+///
+/// Methods that fall through to the unverified RPC via `RootProvider<N>`:
+/// `call`, `estimate_gas`, `create_access_list` (require an
+/// `EthCall` caller implementation, deferred to a follow-up), and every
+/// method that helios cannot back at all (gas estimators, fee history,
+/// `block_number` at tip, mempool subscriptions). The
+/// [`Unverifiable<T>`] wrapper is the planned escape hatch for the
+/// latter group at the inherent-method layer.
 ///
 /// Cheap to clone — internally just an `Arc<Inner<N>>`.
 ///
@@ -172,6 +180,67 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             "eth_getTransactionReceipt",
             |h| async move { h.get_transaction_receipt(hash).await },
             |r| VerifiedValue::Receipt(Box::new(r.clone())),
+        )
+        .await
+    }
+
+    /// Verified block at the given block id.
+    pub async fn block_verified(
+        &self,
+        block_id: BlockId,
+        full_tx: bool,
+    ) -> Result<Option<N::BlockResponse>, VerificationError> {
+        self.run_verified_opt(
+            "eth_getBlockByNumber",
+            |h| async move { h.get_block(block_id, full_tx).await },
+            |b| VerifiedValue::Block(Box::new(b.clone())),
+        )
+        .await
+    }
+
+    /// Verified Merkle proof for an account at the given block id.
+    pub async fn proof_verified(
+        &self,
+        address: Address,
+        slots: Vec<B256>,
+        block_id: BlockId,
+    ) -> Result<EIP1186AccountProofResponse, VerificationError> {
+        self.run_verified(
+            "eth_getProof",
+            move |h| async move { h.get_proof(address, &slots, block_id).await },
+            |v| VerifiedValue::Proof(Box::new(v.clone())),
+        )
+        .await
+    }
+
+    /// Verified transaction by hash.
+    pub async fn transaction_verified(
+        &self,
+        hash: TxHash,
+    ) -> Result<Option<N::TransactionResponse>, VerificationError> {
+        self.run_verified_opt(
+            "eth_getTransactionByHash",
+            |h| async move { h.get_transaction(hash).await },
+            |t| VerifiedValue::Transaction(Box::new(t.clone())),
+        )
+        .await
+    }
+
+    /// Verified block receipts at the given block id.
+    pub async fn block_receipts_verified(
+        &self,
+        block_id: BlockId,
+    ) -> Result<Option<Vec<N::ReceiptResponse>>, VerificationError> {
+        self.run_verified_opt(
+            "eth_getBlockReceipts",
+            |h| async move { h.get_block_receipts(block_id).await },
+            // The verbose event carries only the first receipt as a sample;
+            // shipping the whole vector would be wasteful for a chatty
+            // informational stream.
+            |rs| match rs.first() {
+                Some(r) => VerifiedValue::Receipt(Box::new(r.clone())),
+                None => VerifiedValue::Logs(Vec::new()),
+            },
         )
         .await
     }
@@ -367,6 +436,84 @@ impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
         ProviderCall::BoxedFuture(Box::pin(async move {
             provider
                 .transaction_receipt_verified(hash)
+                .await
+                .map_err(TransportErrorKind::custom)
+        }))
+    }
+
+    fn get_block(&self, block: BlockId) -> EthGetBlock<N::BlockResponse> {
+        let provider = self.clone();
+        EthGetBlock::new_provider(
+            block,
+            Box::new(move |kind| {
+                let provider = provider.clone();
+                let full_tx = matches!(kind, BlockTransactionsKind::Full);
+                ProviderCall::BoxedFuture(Box::pin(async move {
+                    provider
+                        .block_verified(block, full_tx)
+                        .await
+                        .map_err(TransportErrorKind::custom)
+                }))
+            }),
+        )
+    }
+
+    fn get_block_by_hash(&self, hash: BlockHash) -> EthGetBlock<N::BlockResponse> {
+        let provider = self.clone();
+        EthGetBlock::new_provider(
+            BlockId::Hash(hash.into()),
+            Box::new(move |kind| {
+                let provider = provider.clone();
+                let full_tx = matches!(kind, BlockTransactionsKind::Full);
+                ProviderCall::BoxedFuture(Box::pin(async move {
+                    provider
+                        .block_by_hash_verified(hash, full_tx)
+                        .await
+                        .map_err(TransportErrorKind::custom)
+                }))
+            }),
+        )
+    }
+
+    fn get_proof(
+        &self,
+        address: Address,
+        keys: Vec<StorageKey>,
+    ) -> RpcWithBlock<(Address, Vec<StorageKey>), EIP1186AccountProofResponse> {
+        let provider = self.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            let keys = keys.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                provider
+                    .proof_verified(address, keys, block_id)
+                    .await
+                    .map_err(TransportErrorKind::custom)
+            }))
+        })
+    }
+
+    fn get_transaction_by_hash(
+        &self,
+        hash: TxHash,
+    ) -> ProviderCall<(TxHash,), Option<N::TransactionResponse>> {
+        let provider = self.clone();
+        ProviderCall::BoxedFuture(Box::pin(async move {
+            provider
+                .transaction_verified(hash)
+                .await
+                .map_err(TransportErrorKind::custom)
+        }))
+    }
+
+    fn get_block_receipts(
+        &self,
+        block: BlockId,
+    ) -> ProviderCall<(BlockId,), Option<Vec<N::ReceiptResponse>>> {
+        let provider = self.clone();
+        ProviderCall::BoxedFuture(Box::pin(async move {
+            provider
+                .block_receipts_verified(block)
                 .await
                 .map_err(TransportErrorKind::custom)
         }))
