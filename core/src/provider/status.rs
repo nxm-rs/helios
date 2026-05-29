@@ -10,7 +10,7 @@ use helios_common::network_spec::NetworkSpec;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::provider::error::{FailureInfo, VerificationError};
+use crate::provider::error::{FailureInfo, MismatchInfo, VerificationError};
 use crate::provider::event::{
     ConsensusStatus, HealthStatus, SecurityEvent, VerificationCounts, VerificationEvent,
     VerifiedSnapshot,
@@ -59,6 +59,7 @@ pub(crate) struct Inner<N: NetworkSpec> {
 #[derive(Clone)]
 enum RequestOutcome {
     Verified,
+    Mismatched(MismatchInfo),
     Failed(FailureInfo),
     /// The [`PendingHandle`] was dropped without explicit resolution.
     Cancelled,
@@ -144,11 +145,15 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// Use [`Self::barrier_with_timeout`] in production — an unresponsive
     /// helios path could otherwise leave this future pending indefinitely.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
+        if self.is_tainted() {
+            return Err(VerificationError::Tainted);
+        }
         let receivers = self.snapshot_receivers();
+        let mut mismatches = Vec::new();
         let mut failures = Vec::new();
         let mut settled = 0usize;
-        Self::drain_receivers(receivers, &mut failures, &mut settled).await;
-        self.finish_barrier(failures)
+        Self::drain_receivers(receivers, &mut mismatches, &mut failures, &mut settled).await;
+        self.finish_barrier(mismatches, failures)
     }
 
     /// Time-bounded variant of [`Self::barrier`]. On timeout, reports the
@@ -158,14 +163,18 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         &self,
         timeout: Duration,
     ) -> Result<VerifiedSnapshot, VerificationError> {
+        if self.is_tainted() {
+            return Err(VerificationError::Tainted);
+        }
         let receivers = self.snapshot_receivers();
         let snapshot_len = receivers.len();
+        let mut mismatches = Vec::new();
         let mut failures = Vec::new();
         let mut settled = 0usize;
 
         let drained = tokio::time::timeout(
             timeout,
-            Self::drain_receivers(receivers, &mut failures, &mut settled),
+            Self::drain_receivers(receivers, &mut mismatches, &mut failures, &mut settled),
         )
         .await
         .is_ok();
@@ -175,7 +184,11 @@ impl<N: NetworkSpec> VerificationStatus<N> {
                 still_pending: snapshot_len.saturating_sub(settled),
             });
         }
-        self.finish_barrier(failures)
+        self.finish_barrier(mismatches, failures)
+    }
+
+    fn is_tainted(&self) -> bool {
+        matches!(*self.inner.health_rx.borrow(), HealthStatus::Tainted { .. })
     }
 
     fn snapshot_receivers(&self) -> Vec<watch::Receiver<Option<RequestOutcome>>> {
@@ -189,6 +202,7 @@ impl<N: NetworkSpec> VerificationStatus<N> {
 
     async fn drain_receivers(
         receivers: Vec<watch::Receiver<Option<RequestOutcome>>>,
+        mismatches: &mut Vec<MismatchInfo>,
         failures: &mut Vec<FailureInfo>,
         settled: &mut usize,
     ) {
@@ -197,6 +211,7 @@ impl<N: NetworkSpec> VerificationStatus<N> {
                 if let Some(outcome) = rx.borrow().clone() {
                     match outcome {
                         RequestOutcome::Verified | RequestOutcome::Cancelled => {}
+                        RequestOutcome::Mismatched(info) => mismatches.push(info),
                         RequestOutcome::Failed(info) => failures.push(info),
                     }
                     *settled += 1;
@@ -213,8 +228,12 @@ impl<N: NetworkSpec> VerificationStatus<N> {
 
     fn finish_barrier(
         &self,
+        mismatches: Vec<MismatchInfo>,
         failures: Vec<FailureInfo>,
     ) -> Result<VerifiedSnapshot, VerificationError> {
+        if !mismatches.is_empty() {
+            return Err(VerificationError::Mismatched { calls: mismatches });
+        }
         if !failures.is_empty() {
             return Err(VerificationError::Failed { calls: failures });
         }
@@ -228,7 +247,8 @@ impl<N: NetworkSpec> VerificationStatus<N> {
 
     /// Allocate a request id, register a settlement channel, and bump the
     /// pending counter. The returned [`PendingHandle`] must be resolved by
-    /// calling [`PendingHandle::record_verified`] or
+    /// calling [`PendingHandle::record_verified`],
+    /// [`PendingHandle::record_mismatch`], or
     /// [`PendingHandle::record_failed`]; dropping it without resolution
     /// counts as `Cancelled` — the slot is released but no outcome
     /// counter ticks.
@@ -285,10 +305,27 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     }
 
     /// Producer side: set health status. Called by the consensus
-    /// supervisor when stall thresholds trip or recover.
+    /// supervisor when stall thresholds trip or recover. Phase 1.5+
+    /// callers should not use this to flip `Tainted` — taint is the
+    /// verifier's responsibility via [`PendingHandle::record_mismatch`].
     #[doc(hidden)]
     pub fn _set_health(&self, health: HealthStatus) {
         let _ = self.inner.health_tx.send(health);
+    }
+
+    /// Clear taint after a mismatch has been observed by the embedder.
+    /// Guarded: only transitions `Tainted -> Healthy`; calling this in
+    /// any other state (e.g. `Stalled`) is a no-op so a "clear taint"
+    /// button cannot accidentally wipe a stall.
+    pub fn acknowledge_mismatch(&self) {
+        self.inner.health_tx.send_if_modified(|s| {
+            if matches!(s, HealthStatus::Tainted { .. }) {
+                *s = HealthStatus::Healthy;
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -300,10 +337,10 @@ impl<N: NetworkSpec> Default for VerificationStatus<N> {
 
 /// RAII handle returned by [`VerificationStatus::_bump_pending`].
 ///
-/// Must be resolved via [`Self::record_verified`] or [`Self::record_failed`].
-/// Dropping without resolution releases the pending slot but does not
-/// tick any outcome counter — used for cancelled-by-caller paths (e.g.
-/// future dropped mid-RPC).
+/// Must be resolved via [`Self::record_verified`], [`Self::record_mismatch`],
+/// or [`Self::record_failed`]. Dropping without resolution releases the
+/// pending slot but does not tick any outcome counter — used for
+/// cancelled-by-caller paths (e.g. future dropped mid-RPC).
 #[must_use = "PendingHandle should be explicitly resolved or dropped"]
 pub(crate) struct PendingHandle<N: NetworkSpec> {
     id: u64,
@@ -320,6 +357,40 @@ impl<N: NetworkSpec> PendingHandle<N> {
             c.last_change_at = Some(Instant::now());
         });
         self.status.settle(self.id, RequestOutcome::Verified);
+    }
+
+    /// Resolves the handle as a mismatch.
+    ///
+    /// **Load-bearing security invariant:** `HealthStatus::Tainted` is
+    /// flipped *synchronously*, before the security event is published.
+    /// Sign-gating that reads `health()` sees the taint immediately,
+    /// regardless of `security_events` backpressure or consumer
+    /// scheduling. The taint signal cannot be lost.
+    pub(crate) fn record_mismatch(mut self, info: MismatchInfo) {
+        self.resolved = true;
+        // Flip Tainted FIRST. This is what `health()` consumers observe
+        // for sign-gating, and it must precede the security event push
+        // so backpressure on the event channel cannot delay the trust
+        // signal.
+        self.status.inner.health_tx.send_modify(|s| {
+            *s = HealthStatus::Tainted {
+                first_mismatch: Box::new(info.clone()),
+            };
+        });
+        self.status.inner.counts_tx.send_modify(|c| {
+            c.pending = c.pending.saturating_sub(1);
+            c.mismatched = c.mismatched.saturating_add(1);
+            c.last_change_at = Some(Instant::now());
+        });
+        self.status
+            .settle(self.id, RequestOutcome::Mismatched(info.clone()));
+        // Synchronous try_send: if the buffer is full, the diagnostic is
+        // dropped. The trust signal is already visible on `health()`.
+        let _ = self
+            .status
+            .inner
+            .security_tx
+            .try_send(SecurityEvent::Mismatch(info));
     }
 
     /// Resolves the handle and publishes a [`SecurityEvent::Failed`].

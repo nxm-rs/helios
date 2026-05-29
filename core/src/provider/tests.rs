@@ -16,10 +16,11 @@ use futures::future::{BoxFuture, FutureExt};
 use helios_common::types::{SubEventRx, SubscriptionType};
 use helios_ethereum::spec::Ethereum;
 
-use super::error::VerificationError;
+use super::error::{MismatchInfo, VerificationError};
 use super::event::{HealthStatus, SecurityEvent, VerificationEvent};
 use super::status::VerificationStatus;
 use super::value::VerifiedValue;
+use super::optimistic::OptimisticHeliosProvider;
 use super::verified::VerifiedHeliosProvider;
 use crate::client::api::HeliosApi;
 
@@ -709,4 +710,148 @@ async fn assert_chain_id_matches_helios_errors_on_mismatch() {
         ),
         "got {err:?}"
     );
+}
+
+fn build_optimistic_with_asserter(
+    helios: MockHelios,
+) -> (OptimisticHeliosProvider<Ethereum>, Asserter, VerificationStatus<Ethereum>) {
+    let asserter = Asserter::new();
+    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter.clone()));
+    let status = VerificationStatus::<Ethereum>::new();
+    (
+        OptimisticHeliosProvider::from_parts(Arc::new(helios), root, status.clone()),
+        asserter,
+        status,
+    )
+}
+
+#[tokio::test]
+async fn optimistic_matching_value_ticks_verified_and_stays_healthy() {
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(100)) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(100));
+
+    let v = Provider::<Ethereum>::get_balance(&provider, addr(40))
+        .await
+        .unwrap();
+    assert_eq!(v, U256::from(100));
+
+    // Background verification has to settle. Spin briefly.
+    let mut counts = status.counts();
+    while counts.borrow().verified == 0 {
+        let _ = counts.changed().await;
+    }
+
+    let snapshot = counts.borrow().clone();
+    assert_eq!(snapshot.verified, 1);
+    assert_eq!(snapshot.mismatched, 0);
+    assert_eq!(snapshot.failed, 0);
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Healthy
+    ));
+}
+
+#[tokio::test]
+async fn optimistic_mismatch_flips_tainted_before_security_event() {
+    // Mock helios returns 200; asserter (unverified RPC) returns 100.
+    // Optimistic flow: caller sees 100 (unverified), background 
+    // verifier sees 200 from helios -> mismatch.
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(200)) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(100));
+
+    let mut health = status.health();
+    let mut security_rx = status.take_security_events().expect("rx");
+
+    let v = Provider::<Ethereum>::get_balance(&provider, addr(41))
+        .await
+        .unwrap();
+    assert_eq!(v, U256::from(100), "caller sees unverified value");
+
+    // Wait for Tainted on health(). This is the load-bearing assertion:
+    // health() flips before security_rx receives the event.
+    loop {
+        let _ = health.changed().await;
+        if matches!(*health.borrow(), HealthStatus::Tainted { .. }) {
+            break;
+        }
+    }
+
+    // health() is Tainted. Only NOW should the security event be visible.
+    // Drain it and confirm shape.
+    let event = security_rx.recv().await.expect("security event");
+    match event {
+        SecurityEvent::Mismatch(info) => {
+            assert_eq!(info.method, "eth_getBalance");
+            assert!(info.unverified.contains("64")); // 100 in hex
+            assert!(info.verified.contains("c8")); // 200 in hex
+        }
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+
+    let counts = status.counts().borrow().clone();
+    assert_eq!(counts.verified, 0);
+    assert_eq!(counts.mismatched, 1);
+}
+
+#[tokio::test]
+async fn barrier_refuses_when_tainted() {
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(2)) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(1));
+
+    let _ = Provider::<Ethereum>::get_balance(&provider, addr(42)).await;
+    let mut health = status.health();
+    while !matches!(*health.borrow(), HealthStatus::Tainted { .. }) {
+        let _ = health.changed().await;
+    }
+
+    let err = status.barrier().await.unwrap_err();
+    assert!(matches!(err, VerificationError::Tainted), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acknowledge_mismatch_clears_tainted_only() {
+    let status = VerificationStatus::<Ethereum>::new();
+    // No taint -> noop.
+    status.acknowledge_mismatch();
+    assert!(matches!(*status.health().borrow(), HealthStatus::Healthy));
+
+    // Force Tainted via the producer surface.
+    let info = MismatchInfo {
+        method: "eth_getBalance",
+        unverified: "0x1".into(),
+        verified: "0x2".into(),
+        at: std::time::Instant::now(),
+    };
+    let handle = status._bump_pending();
+    handle.record_mismatch(info);
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Tainted { .. }
+    ));
+
+    status.acknowledge_mismatch();
+    assert!(matches!(*status.health().borrow(), HealthStatus::Healthy));
+}
+
+#[tokio::test]
+async fn acknowledge_mismatch_does_not_clobber_stalled() {
+    let status = VerificationStatus::<Ethereum>::new();
+    status._set_health(HealthStatus::Stalled);
+    status.acknowledge_mismatch();
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Stalled
+    ));
 }

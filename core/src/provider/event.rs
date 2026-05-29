@@ -3,11 +3,15 @@
 //! - [`VerificationCounts`] is delivered via `watch` — latest-value
 //!   semantics, cheap to poll at frame rate.
 //! - [`HealthStatus`] is also `watch` — sticky terminal state. Late
-//!   subscribers observe the current value immediately.
-//! - [`SecurityEvent`] is delivered via bounded `mpsc`. The Phase 1
-//!   verifier publishes via `try_send`, so events are dropped when the
-//!   consumer is too slow rather than blocking the producer; a full
-//!   producer-backpressure design lands with the optimistic provider.
+//!   subscribers observe the current value immediately. The load-bearing
+//!   security invariant: `Tainted` is flipped synchronously by the
+//!   verifier on the first mismatch, **before** the security_events
+//!   queue is touched. Sign-gating that reads `health()` sees the taint
+//!   regardless of event-stream backpressure.
+//! - [`SecurityEvent`] is delivered via bounded `mpsc`. The verifier
+//!   publishes via `try_send`, so events are dropped when the consumer
+//!   is too slow rather than blocking the producer. The trust signal
+//!   lives on `HealthStatus`; this channel carries diagnostic detail.
 //! - [`VerificationEvent`] is delivered via `broadcast` (drop-oldest) —
 //!   informational chatter where lossy is acceptable.
 
@@ -15,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use helios_common::network_spec::NetworkSpec;
 
-use crate::provider::error::FailureInfo;
+use crate::provider::error::{FailureInfo, MismatchInfo};
 use crate::provider::value::VerifiedValue;
 
 /// Counters for verification activity, delivered via `watch::Receiver`.
@@ -23,6 +27,7 @@ use crate::provider::value::VerifiedValue;
 pub struct VerificationCounts {
     pub pending: usize,
     pub verified: usize,
+    pub mismatched: usize,
     pub failed: usize,
     pub last_change_at: Option<Instant>,
 }
@@ -39,11 +44,18 @@ pub enum HealthStatus {
     /// Consensus client has not made progress for longer than the
     /// configured stall threshold.
     Stalled,
+    /// At least one mismatch has been observed against the configured
+    /// execution RPC for this `(execution_rpc_url, chain_id)`. Cleared
+    /// via [`super::VerificationStatus::acknowledge_mismatch`].
+    Tainted { first_mismatch: Box<MismatchInfo> },
 }
 
 /// Security-critical events. Delivered via bounded `mpsc::Receiver`.
 #[derive(Debug, Clone)]
 pub enum SecurityEvent {
+    /// A verified-vs-unverified value diverged. The trust signal lives
+    /// on [`HealthStatus::Tainted`]; this carries the diagnostic detail.
+    Mismatch(MismatchInfo),
     Failed(FailureInfo),
 }
 
