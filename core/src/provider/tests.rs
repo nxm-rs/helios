@@ -855,3 +855,60 @@ async fn acknowledge_mismatch_does_not_clobber_stalled() {
         HealthStatus::Stalled
     ));
 }
+
+#[tokio::test]
+async fn set_health_cannot_clobber_tainted() {
+    let status = VerificationStatus::<Ethereum>::new();
+    let info = MismatchInfo {
+        method: "eth_getBalance",
+        unverified: "0x1".into(),
+        verified: "0x2".into(),
+        at: std::time::Instant::now(),
+    };
+    let handle = status._bump_pending();
+    handle.record_mismatch(info);
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Tainted { .. }
+    ));
+
+    // A "supervisor recovery" call MUST NOT clobber Tainted.
+    status._set_health(HealthStatus::Healthy);
+    assert!(
+        matches!(*status.health().borrow(), HealthStatus::Tainted { .. }),
+        "_set_health(Healthy) silently overwrote Tainted"
+    );
+
+    // Stalled must also not clobber Tainted.
+    status._set_health(HealthStatus::Stalled);
+    assert!(
+        matches!(*status.health().borrow(), HealthStatus::Tainted { .. }),
+        "_set_health(Stalled) silently overwrote Tainted"
+    );
+}
+
+#[tokio::test]
+async fn acknowledge_mismatch_emits_security_event() {
+    let status = VerificationStatus::<Ethereum>::new();
+    let mut rx = status.take_security_events().unwrap();
+
+    // First push a mismatch so there's something to acknowledge.
+    let info = MismatchInfo {
+        method: "eth_getBalance",
+        unverified: "0x1".into(),
+        verified: "0x2".into(),
+        at: std::time::Instant::now(),
+    };
+    let handle = status._bump_pending();
+    handle.record_mismatch(info);
+
+    // Drain the Mismatch event.
+    let _ = rx.recv().await;
+
+    // Now acknowledge.
+    status.acknowledge_mismatch();
+
+    // A MismatchAcknowledged event should follow.
+    let event = rx.recv().await.expect("MismatchAcknowledged");
+    assert!(matches!(event, SecurityEvent::MismatchAcknowledged { .. }));
+}

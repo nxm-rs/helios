@@ -305,12 +305,29 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     }
 
     /// Producer side: set health status. Called by the consensus
-    /// supervisor when stall thresholds trip or recover. Phase 1.5+
-    /// callers should not use this to flip `Tainted` — taint is the
-    /// verifier's responsibility via [`PendingHandle::record_mismatch`].
+    /// supervisor when stall thresholds trip or recover.
+    ///
+    /// **Sticky-taint guard:** `_set_health` refuses to overwrite a
+    /// `Tainted` state with anything *except* another `Tainted`. So a
+    /// stall recovery (`Healthy`) while the provider is already tainted
+    /// preserves the trust signal — embedders that read `health()` for
+    /// sign-gating cannot have the taint silently cleared by a
+    /// concurrent supervisor write. Use
+    /// [`Self::acknowledge_mismatch`] to explicitly clear taint.
     #[doc(hidden)]
     pub fn _set_health(&self, health: HealthStatus) {
-        let _ = self.inner.health_tx.send(health);
+        self.inner.health_tx.send_if_modified(|current| {
+            // Sticky taint: refuse to overwrite Tainted with anything
+            // other than Tainted. Any → Tainted, Tainted → Tainted (a
+            // later mismatch) are allowed.
+            if matches!(current, HealthStatus::Tainted { .. })
+                && !matches!(health, HealthStatus::Tainted { .. })
+            {
+                return false;
+            }
+            *current = health;
+            true
+        });
     }
 
     /// Clear taint after a mismatch has been observed by the embedder.
@@ -318,7 +335,7 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// any other state (e.g. `Stalled`) is a no-op so a "clear taint"
     /// button cannot accidentally wipe a stall.
     pub fn acknowledge_mismatch(&self) {
-        self.inner.health_tx.send_if_modified(|s| {
+        let cleared = self.inner.health_tx.send_if_modified(|s| {
             if matches!(s, HealthStatus::Tainted { .. }) {
                 *s = HealthStatus::Healthy;
                 true
@@ -326,6 +343,12 @@ impl<N: NetworkSpec> VerificationStatus<N> {
                 false
             }
         });
+        if cleared {
+            let _ = self
+                .inner
+                .security_tx
+                .try_send(SecurityEvent::MismatchAcknowledged { at: Instant::now() });
+        }
     }
 }
 
