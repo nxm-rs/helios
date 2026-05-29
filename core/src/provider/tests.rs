@@ -1004,9 +1004,8 @@ async fn scope_barrier_resolves_when_only_post_scope_calls_settle() {
 
     // Pre-scope call: spawn and wait until it's registered as pending.
     let p1 = provider.clone();
-    let pre_call = tokio::spawn(async move {
-        Provider::<Ethereum>::get_balance(&p1, addr(50)).await
-    });
+    let pre_call =
+        tokio::spawn(async move { Provider::<Ethereum>::get_balance(&p1, addr(50)).await });
     while status.counts().borrow().pending == 0 {
         tokio::task::yield_now().await;
     }
@@ -1015,9 +1014,8 @@ async fn scope_barrier_resolves_when_only_post_scope_calls_settle() {
 
     // Post-scope call: spawn and wait until it's also pending.
     let p2 = provider.clone();
-    let post_call = tokio::spawn(async move {
-        Provider::<Ethereum>::get_balance(&p2, addr(51)).await
-    });
+    let post_call =
+        tokio::spawn(async move { Provider::<Ethereum>::get_balance(&p2, addr(51)).await });
     while status.counts().borrow().pending < 2 {
         tokio::task::yield_now().await;
     }
@@ -1032,7 +1030,10 @@ async fn scope_barrier_resolves_when_only_post_scope_calls_settle() {
     let _ = futures::poll!(scope_barrier.as_mut());
     release_post.notify_one();
     let r = scope_barrier.await;
-    assert!(r.is_ok(), "scope barrier should resolve after post-call settles, got {r:?}");
+    assert!(
+        r.is_ok(),
+        "scope barrier should resolve after post-call settles, got {r:?}"
+    );
 
     // Clean up: release the pre call so the test doesn't leak a task.
     release_pre.notify_one();
@@ -1088,25 +1089,19 @@ async fn scope_barrier_with_timeout_counts_only_scope_pending() {
     asserter.push_success(&U256::from(1));
 
     let p1 = provider.clone();
-    let _pre = tokio::spawn(async move {
-        Provider::<Ethereum>::get_balance(&p1, addr(70)).await
-    });
+    let _pre = tokio::spawn(async move { Provider::<Ethereum>::get_balance(&p1, addr(70)).await });
     while status.counts().borrow().pending == 0 {
         tokio::task::yield_now().await;
     }
     let scope = status.scope();
 
     let p2 = provider.clone();
-    let _post = tokio::spawn(async move {
-        Provider::<Ethereum>::get_balance(&p2, addr(71)).await
-    });
+    let _post = tokio::spawn(async move { Provider::<Ethereum>::get_balance(&p2, addr(71)).await });
     while status.counts().borrow().pending < 2 {
         tokio::task::yield_now().await;
     }
 
-    let result = scope
-        .barrier_with_timeout(Duration::from_millis(100))
-        .await;
+    let result = scope.barrier_with_timeout(Duration::from_millis(100)).await;
     match result {
         Err(VerificationError::Timeout { still_pending }) => {
             assert_eq!(
