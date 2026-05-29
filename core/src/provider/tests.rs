@@ -1397,3 +1397,112 @@ async fn builder_data_dir_preserves_taint_across_restart() {
         );
     }
 }
+
+#[tokio::test]
+async fn supervisor_trips_stalled_when_head_age_threshold_exceeded() {
+    use super::supervisor::{spawn_supervisor, StallPolicy};
+
+    let status = VerificationStatus::<Ethereum>::new();
+    let policy = StallPolicy {
+        head_age_threshold: Duration::from_millis(50),
+        check_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+    let _handle = spawn_supervisor(status.clone(), policy);
+
+    // No advance reports -> head age grows -> Stalled.
+    let mut health = status.health();
+    let observed = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(*health.borrow(), HealthStatus::Stalled { .. }) {
+                return true;
+            }
+            let _ = health.changed().await;
+        }
+    })
+    .await;
+    assert!(observed.is_ok(), "supervisor should flip Stalled within timeout");
+}
+
+#[tokio::test]
+async fn supervisor_advance_clears_stalled_and_updates_consensus_status() {
+    use super::supervisor::{spawn_supervisor, StallPolicy};
+
+    let status = VerificationStatus::<Ethereum>::new();
+    let policy = StallPolicy {
+        head_age_threshold: Duration::from_millis(50),
+        check_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+    let handle = spawn_supervisor(status.clone(), policy);
+
+    // Let it taint first.
+    let mut health = status.health();
+    while !matches!(*health.borrow(), HealthStatus::Stalled { .. }) {
+        let _ = health.changed().await;
+    }
+
+    // Report an advance -> Healthy + consensus_status.tip updated.
+    handle.report_advance(12_345_678);
+
+    let recovered = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(*health.borrow(), HealthStatus::Healthy) {
+                return true;
+            }
+            let _ = health.changed().await;
+        }
+    })
+    .await;
+    assert!(recovered.is_ok(), "advance should clear Stalled");
+    assert_eq!(status.consensus_status().borrow().tip, 12_345_678);
+}
+
+#[tokio::test]
+async fn supervisor_advance_does_not_clear_tainted() {
+    use super::supervisor::{spawn_supervisor, StallPolicy};
+
+    let status = VerificationStatus::<Ethereum>::new();
+    let handle = spawn_supervisor(status.clone(), StallPolicy::default());
+
+    // Force Tainted directly.
+    status._set_health(HealthStatus::Tainted {
+        first_mismatch: Box::new(MismatchInfo::now("eth_getBalance", "0x1", "0x2")),
+    });
+
+    // Reporting an advance must NOT clear Tainted — taint is sticky
+    // until acknowledge_mismatch.
+    handle.report_advance(1);
+
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Tainted { .. }
+    ));
+}
+
+#[tokio::test]
+async fn supervisor_consecutive_failures_trip_stalled_before_timer() {
+    use super::supervisor::{spawn_supervisor, StallPolicy};
+
+    let status = VerificationStatus::<Ethereum>::new();
+    let policy = StallPolicy {
+        // Long head-age so the timer doesn't trip first.
+        head_age_threshold: Duration::from_secs(60),
+        check_interval: Duration::from_secs(10),
+        advance_failure_threshold: 3,
+        ..Default::default()
+    };
+    let handle = spawn_supervisor(status.clone(), policy);
+
+    handle.report_failure();
+    handle.report_failure();
+    // Still Healthy after 2.
+    assert!(matches!(*status.health().borrow(), HealthStatus::Healthy));
+
+    handle.report_failure();
+    // 3 failures hits the threshold -> Stalled.
+    assert!(matches!(
+        *status.health().borrow(),
+        HealthStatus::Stalled { .. }
+    ));
+}

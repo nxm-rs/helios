@@ -40,6 +40,7 @@ pub mod event;
 pub mod optimistic;
 pub mod persistence;
 pub mod status;
+pub mod supervisor;
 pub mod value;
 pub mod verified;
 
@@ -55,5 +56,6 @@ pub use event::{
 pub use optimistic::OptimisticHeliosProvider;
 pub use persistence::{FileTaintStore, TaintConfig, TaintStore};
 pub use status::{Scope, VerificationStatus};
+pub use supervisor::{spawn_supervisor, StallPolicy, SupervisorHandle};
 pub use value::{Unverifiable, VerifiedValue};
 pub use verified::{ChainIdMismatch, VerifiedHeliosProvider};
