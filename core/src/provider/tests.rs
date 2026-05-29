@@ -700,7 +700,13 @@ async fn assert_chain_id_matches_helios_errors_on_mismatch() {
     asserter.push_success(&U64::from(137u64));
     let err = provider.assert_chain_id_matches_helios().await.unwrap_err();
     assert!(
-        matches!(err, ChainIdMismatch::Mismatch { helios: 1, rpc: 137 }),
+        matches!(
+            err,
+            ChainIdMismatch::Mismatch {
+                helios: 1,
+                rpc: 137
+            }
+        ),
         "got {err:?}"
     );
 }
