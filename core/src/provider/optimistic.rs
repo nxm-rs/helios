@@ -348,11 +348,7 @@ impl<N: NetworkSpec> Provider<N> for OptimisticHeliosProvider<N> {
         })
     }
 
-    fn get_storage_at(
-        &self,
-        address: Address,
-        key: U256,
-    ) -> RpcWithBlock<(Address, U256), U256> {
+    fn get_storage_at(&self, address: Address, key: U256) -> RpcWithBlock<(Address, U256), U256> {
         let provider = self.clone();
         RpcWithBlock::new_provider(move |block_id| {
             let provider = provider.clone();
