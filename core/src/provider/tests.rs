@@ -1421,7 +1421,10 @@ async fn supervisor_trips_stalled_when_head_age_threshold_exceeded() {
         }
     })
     .await;
-    assert!(observed.is_ok(), "supervisor should flip Stalled within timeout");
+    assert!(
+        observed.is_ok(),
+        "supervisor should flip Stalled within timeout"
+    );
 }
 
 #[tokio::test]
@@ -1500,10 +1503,7 @@ async fn supervisor_consecutive_failures_trip_stalled_before_timer() {
 
     handle.report_failure();
     // 3 failures hits the threshold -> Stalled.
-    assert!(matches!(
-        *status.health().borrow(),
-        HealthStatus::Stalled
-    ));
+    assert!(matches!(*status.health().borrow(), HealthStatus::Stalled));
 }
 
 #[tokio::test]
