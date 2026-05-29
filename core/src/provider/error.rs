@@ -30,7 +30,10 @@ impl std::fmt::Display for VerificationError {
                 write!(f, "verification failed in {} call(s)", calls.len())
             }
             Self::Timeout { still_pending } => {
-                write!(f, "verification barrier timed out ({still_pending} still pending)")
+                write!(
+                    f,
+                    "verification barrier timed out ({still_pending} still pending)"
+                )
             }
         }
     }
