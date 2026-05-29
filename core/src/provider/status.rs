@@ -29,6 +29,12 @@ pub struct VerificationStatus<N: NetworkSpec> {
 }
 
 pub(crate) struct Inner<N: NetworkSpec> {
+    // Each `watch` channel keeps both ends in `Inner`. The Receiver is
+    // retained to guarantee `Sender::send` succeeds even across windows
+    // where all external subscribers have temporarily dropped — without
+    // a held receiver, `tokio::sync::watch::Sender::send` returns Err
+    // and the producer-side update is silently lost. A drive-by
+    // "cleanup unused field" refactor would re-introduce that bug.
     counts_tx: watch::Sender<VerificationCounts>,
     counts_rx: watch::Receiver<VerificationCounts>,
 
@@ -226,10 +232,19 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// [`PendingHandle::record_failed`]; dropping it without resolution
     /// counts as `Cancelled` — the slot is released but no outcome
     /// counter ticks.
+    ///
+    /// Id allocation and the pending-map insert are atomic together: any
+    /// reader that locks `pending` either sees the bumped `next_id` and
+    /// the matching entry, or neither. Required for the snapshot
+    /// semantics that downstream barriers / scopes rely on.
     pub(crate) fn _bump_pending(&self) -> PendingHandle<N> {
-        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, _) = watch::channel(None);
-        self.inner.pending.lock().insert(id, tx);
+        let id = {
+            let mut pending = self.inner.pending.lock();
+            let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+            pending.insert(id, tx);
+            id
+        };
         self.inner.counts_tx.send_modify(|c| {
             c.pending = c.pending.saturating_add(1);
             c.last_change_at = Some(Instant::now());
@@ -253,10 +268,12 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// cloning large network types.
     pub(crate) fn _emit_verbose_with<F>(&self, make: F)
     where
-        F: FnOnce() -> VerificationEvent<N>,
+        F: FnOnce() -> Option<VerificationEvent<N>>,
     {
         if self.inner.verbose_tx.receiver_count() > 0 {
-            let _ = self.inner.verbose_tx.send(make());
+            if let Some(event) = make() {
+                let _ = self.inner.verbose_tx.send(event);
+            }
         }
     }
 
