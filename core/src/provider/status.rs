@@ -57,7 +57,7 @@ pub(crate) struct Inner<N: NetworkSpec> {
 /// [`Inner::pending`] so [`VerificationStatus::barrier`] can classify
 /// each snapshot id when it settles.
 #[derive(Clone)]
-enum RequestOutcome {
+pub(crate) enum RequestOutcome {
     Verified,
     Mismatched(MismatchInfo),
     Failed(FailureInfo),
@@ -141,19 +141,16 @@ impl<N: NetworkSpec> VerificationStatus<N> {
     /// Sign-gating barrier: capture the request-ids currently in `pending`
     /// state at this moment, and resolve when every one of them has
     /// settled. Calls landing after barrier creation are not waited for.
+    /// Refuses immediately with [`VerificationError::Tainted`] if the
+    /// provider is currently tainted.
     ///
     /// Use [`Self::barrier_with_timeout`] in production — an unresponsive
     /// helios path could otherwise leave this future pending indefinitely.
+    ///
+    /// See also [`Self::scope`] for a per-screen barrier that only waits
+    /// for calls made within the scope's lifetime.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
-        if self.is_tainted() {
-            return Err(VerificationError::Tainted);
-        }
-        let receivers = self.snapshot_receivers();
-        let mut mismatches = Vec::new();
-        let mut failures = Vec::new();
-        let mut settled = 0usize;
-        Self::drain_receivers(receivers, &mut mismatches, &mut failures, &mut settled).await;
-        self.finish_barrier(mismatches, failures)
+        self.barrier_over_receivers(self.snapshot_receivers()).await
     }
 
     /// Time-bounded variant of [`Self::barrier`]. On timeout, reports the
@@ -163,10 +160,44 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         &self,
         timeout: Duration,
     ) -> Result<VerifiedSnapshot, VerificationError> {
+        self.barrier_with_timeout_over_receivers(self.snapshot_receivers(), timeout)
+            .await
+    }
+
+    /// Open a new [`Scope`] for sign-gating one logical UI screen or
+    /// workflow. The scope captures the current request-id counter; its
+    /// own `barrier()` filters the pending registry to ids allocated
+    /// after this point, so unrelated background calls in flight at
+    /// signing time don't block the gate.
+    pub fn scope(&self) -> Scope<N> {
+        Scope {
+            status: self.clone(),
+            start_id: self.inner.next_id.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) async fn barrier_over_receivers(
+        &self,
+        receivers: Vec<watch::Receiver<Option<RequestOutcome>>>,
+    ) -> Result<VerifiedSnapshot, VerificationError> {
         if self.is_tainted() {
             return Err(VerificationError::Tainted);
         }
-        let receivers = self.snapshot_receivers();
+        let mut mismatches = Vec::new();
+        let mut failures = Vec::new();
+        let mut settled = 0usize;
+        Self::drain_receivers(receivers, &mut mismatches, &mut failures, &mut settled).await;
+        self.finish_barrier(mismatches, failures)
+    }
+
+    pub(crate) async fn barrier_with_timeout_over_receivers(
+        &self,
+        receivers: Vec<watch::Receiver<Option<RequestOutcome>>>,
+        timeout: Duration,
+    ) -> Result<VerifiedSnapshot, VerificationError> {
+        if self.is_tainted() {
+            return Err(VerificationError::Tainted);
+        }
         let snapshot_len = receivers.len();
         let mut mismatches = Vec::new();
         let mut failures = Vec::new();
@@ -198,6 +229,26 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         // `watch::Sender` we subscribed to.
         let pending = self.inner.pending.lock();
         pending.values().map(watch::Sender::subscribe).collect()
+    }
+
+    /// Snapshot the pending registry filtered to ids in `[start, end)`.
+    /// Used by [`Scope`] to barrier only on calls made after scope
+    /// creation.
+    pub(crate) fn snapshot_receivers_in_range(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Vec<watch::Receiver<Option<RequestOutcome>>> {
+        let pending = self.inner.pending.lock();
+        pending
+            .iter()
+            .filter(|(id, _)| **id >= start && **id < end)
+            .map(|(_, tx)| tx.subscribe())
+            .collect()
+    }
+
+    pub(crate) fn next_id_snapshot(&self) -> u64 {
+        self.inner.next_id.load(Ordering::Relaxed)
     }
 
     async fn drain_receivers(
@@ -447,5 +498,66 @@ impl<N: NetworkSpec> Drop for PendingHandle<N> {
             });
             self.status.settle(self.id, RequestOutcome::Cancelled);
         }
+    }
+}
+
+/// Per-scope sign-gating barrier. Returned by [`VerificationStatus::scope`].
+///
+/// Captures the request-id counter at creation time. The scope's
+/// [`Self::barrier`] / [`Self::barrier_with_timeout`] await only calls
+/// whose ids fall in `[start_id, current_next_id)` at barrier call
+/// time, so unrelated background calls in flight elsewhere in the
+/// process don't block the gate.
+///
+/// `Tainted` is **not** scope-local — it's the sticky trust signal for
+/// the entire provider, so a mismatch on any in-flight call (even one
+/// outside this scope) refuses every barrier. That's intentional:
+/// signing on a tainted provider is unsafe regardless of which screen
+/// observed the mismatch.
+///
+/// Cheap to clone — just an `Arc<Inner>` + a `u64`.
+#[derive(Clone)]
+pub struct Scope<N: NetworkSpec> {
+    status: VerificationStatus<N>,
+    start_id: u64,
+}
+
+impl<N: NetworkSpec> Scope<N> {
+    /// Wait for every call made within this scope to settle.
+    ///
+    /// "Within this scope" means: an id allocated by `_bump_pending`
+    /// after [`VerificationStatus::scope`] was called and before this
+    /// `barrier()` call. Ids that landed and settled inside the window
+    /// before barrier() are not awaited (they're already done) but
+    /// their `Tainted` flag — if any was a mismatch — still refuses
+    /// the barrier via the sticky `health()` check.
+    pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
+        let end_id = self.status.next_id_snapshot();
+        let receivers = self
+            .status
+            .snapshot_receivers_in_range(self.start_id, end_id);
+        self.status.barrier_over_receivers(receivers).await
+    }
+
+    /// Time-bounded variant of [`Self::barrier`]. On timeout, reports
+    /// the number of scope ids that hadn't settled yet.
+    pub async fn barrier_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<VerifiedSnapshot, VerificationError> {
+        let end_id = self.status.next_id_snapshot();
+        let receivers = self
+            .status
+            .snapshot_receivers_in_range(self.start_id, end_id);
+        self.status
+            .barrier_with_timeout_over_receivers(receivers, timeout)
+            .await
+    }
+
+    /// Returns the parent [`VerificationStatus`] handle so consumers
+    /// can subscribe to `health()` / `counts()` / etc. without holding
+    /// a separate handle.
+    pub fn verification_status(&self) -> &VerificationStatus<N> {
+        &self.status
     }
 }
