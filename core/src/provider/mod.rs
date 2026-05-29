@@ -16,22 +16,27 @@
 //! | channel | type | semantics |
 //! |---|---|---|
 //! | `counts()` | `watch::Receiver<VerificationCounts>` | latest-value; cheap-poll for UIs |
-//! | `health()` | `watch::Receiver<HealthStatus>` | sticky terminal state (`Stalled`) |
+//! | `health()` | `watch::Receiver<HealthStatus>` | sticky terminal state; `Tainted` flipped synchronously by the verifier |
 //! | `consensus_status()` | `watch::Receiver<ConsensusStatus>` | consensus tip / head age / checkpoint |
 //! | `take_security_events()` | `mpsc::Receiver<SecurityEvent>` | bounded, `try_send` (may drop on full) |
 //! | `events_verbose()` | `broadcast::Receiver<VerificationEvent<N>>` | drop-oldest informational chatter |
 //!
-//! The mismatch-detection and `Tainted`-flipping paths described in the
-//! design issue land alongside the optimistic provider. Phase 1 surfaces
-//! only failures (transport errors, consensus client failures); a verified
-//! call that mismatches against an unverified value is not yet
-//! detectable from this module.
+//! Load-bearing security invariant: `HealthStatus::Tainted` flips
+//! synchronously on the first mismatch, **before** the security_events
+//! queue is touched. Sign-gating that reads `health()` sees the taint
+//! regardless of `security_events` backpressure or consumer scheduling.
+//! Mismatches are produced by [`OptimisticHeliosProvider`]'s verifier
+//! tasks; the verified-blocking [`VerifiedHeliosProvider`] does not
+//! produce mismatches directly (it returns only consensus-anchored
+//! values), but observes them on `health()` when both providers share
+//! a [`VerificationStatus`].
 //!
 //! [`Provider<N>`]: alloy::providers::Provider
 //! [`Unverifiable<T>`]: value::Unverifiable
 
 pub mod error;
 pub mod event;
+pub mod optimistic;
 pub mod status;
 pub mod value;
 pub mod verified;
@@ -39,11 +44,12 @@ pub mod verified;
 #[cfg(test)]
 mod tests;
 
-pub use error::{FailureInfo, VerificationError};
+pub use error::{FailureInfo, MismatchInfo, VerificationError};
 pub use event::{
     ConsensusStatus, HealthStatus, SecurityEvent, SkipReason, VerificationCounts,
     VerificationEvent, VerifiedSnapshot,
 };
+pub use optimistic::OptimisticHeliosProvider;
 pub use status::VerificationStatus;
 pub use value::{Unverifiable, VerifiedValue};
 pub use verified::{ChainIdMismatch, VerifiedHeliosProvider};

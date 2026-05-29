@@ -5,6 +5,13 @@ use std::time::Instant;
 /// Error returned by verified-path operations on the helios provider.
 #[derive(Debug, Clone)]
 pub enum VerificationError {
+    /// One or more verifications observed a mismatch between the
+    /// unverified RPC's response and the verified consensus-backed
+    /// answer. The provider is tainted; subsequent reads through a
+    /// barrier return [`Self::Tainted`] until
+    /// [`super::VerificationStatus::acknowledge_mismatch`] is called.
+    Mismatched { calls: Vec<MismatchInfo> },
+
     /// One or more verifications failed before they could complete
     /// (transport error against the consensus RPC, proof-decoding failure,
     /// etc.). Not a trust failure, but the verified state is unknown.
@@ -13,6 +20,11 @@ pub enum VerificationError {
     /// A [`super::VerificationStatus::barrier`] wait timed out with calls
     /// still pending.
     Timeout { still_pending: usize },
+
+    /// The provider has been tainted by a prior mismatch and the consumer
+    /// hasn't called [`super::VerificationStatus::acknowledge_mismatch`].
+    /// Barriers refuse with this until the taint is cleared.
+    Tainted,
 }
 
 /// Detail for a single failed call.
@@ -23,9 +35,27 @@ pub struct FailureInfo {
     pub at: Instant,
 }
 
+/// Detail for a single mismatched call. The unverified and verified
+/// values are JSON-serialised for diagnostic display so the struct can
+/// be `Clone + Send + 'static` without depending on each method's
+/// response type at the trait level.
+#[derive(Debug, Clone)]
+pub struct MismatchInfo {
+    pub method: &'static str,
+    /// JSON-serialised unverified value. Boxed `str` keeps the enum's
+    /// stack footprint bounded; large values (full blocks, receipts)
+    /// would otherwise blow the size.
+    pub unverified: Box<str>,
+    pub verified: Box<str>,
+    pub at: Instant,
+}
+
 impl std::fmt::Display for VerificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Mismatched { calls } => {
+                write!(f, "verification mismatch in {} call(s)", calls.len())
+            }
             Self::Failed { calls } => {
                 write!(f, "verification failed in {} call(s)", calls.len())
             }
@@ -35,6 +65,7 @@ impl std::fmt::Display for VerificationError {
                     "verification barrier timed out ({still_pending} still pending)"
                 )
             }
+            Self::Tainted => write!(f, "provider tainted by prior mismatch"),
         }
     }
 }
