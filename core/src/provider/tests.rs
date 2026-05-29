@@ -33,12 +33,35 @@ type ReceiptFn = Box<
         > + Send
         + Sync,
 >;
+type TxReq = <Ethereum as alloy::network::Network>::TransactionRequest;
+type CallFn = Box<
+    dyn Fn(TxReq, BlockId, Option<StateOverride>) -> BoxFuture<'static, Result<Bytes>>
+        + Send
+        + Sync,
+>;
+type EstimateFn = Box<
+    dyn Fn(TxReq, Option<BlockId>, Option<StateOverride>) -> BoxFuture<'static, Result<u64>>
+        + Send
+        + Sync,
+>;
+type AccessListFn = Box<
+    dyn Fn(
+            TxReq,
+            BlockId,
+            Option<StateOverride>,
+        ) -> BoxFuture<'static, Result<AccessListResult>>
+        + Send
+        + Sync,
+>;
 
 struct MockHelios {
     get_balance_fn: BalanceFn,
     get_nonce_fn: NonceFn,
     get_logs_fn: LogsFn,
     get_transaction_receipt_fn: ReceiptFn,
+    call_fn: CallFn,
+    estimate_gas_fn: EstimateFn,
+    create_access_list_fn: AccessListFn,
 }
 
 impl Default for MockHelios {
@@ -55,6 +78,15 @@ impl Default for MockHelios {
             }),
             get_transaction_receipt_fn: Box::new(|_| {
                 async { unimplemented!("MockHelios::get_transaction_receipt not staged") }.boxed()
+            }),
+            call_fn: Box::new(|_, _, _| {
+                async { unimplemented!("MockHelios::call not staged") }.boxed()
+            }),
+            estimate_gas_fn: Box::new(|_, _, _| {
+                async { unimplemented!("MockHelios::estimate_gas not staged") }.boxed()
+            }),
+            create_access_list_fn: Box::new(|_, _, _| {
+                async { unimplemented!("MockHelios::create_access_list not staged") }.boxed()
             }),
         }
     }
@@ -143,27 +175,27 @@ impl HeliosApi<Ethereum> for MockHelios {
     }
     async fn call(
         &self,
-        _tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
-        _block_id: BlockId,
-        _state_overrides: Option<StateOverride>,
+        tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
+        block_id: BlockId,
+        state_overrides: Option<StateOverride>,
     ) -> Result<Bytes> {
-        unimplemented!()
+        (self.call_fn)(tx.clone(), block_id, state_overrides).await
     }
     async fn estimate_gas(
         &self,
-        _tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
-        _block_id: Option<BlockId>,
-        _state_overrides: Option<StateOverride>,
+        tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
+        block_id: Option<BlockId>,
+        state_overrides: Option<StateOverride>,
     ) -> Result<u64> {
-        unimplemented!()
+        (self.estimate_gas_fn)(tx.clone(), block_id, state_overrides).await
     }
     async fn create_access_list(
         &self,
-        _tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
-        _block_id: BlockId,
-        _state_overrides: Option<StateOverride>,
+        tx: &<Ethereum as alloy::network::Network>::TransactionRequest,
+        block_id: BlockId,
+        state_overrides: Option<StateOverride>,
     ) -> Result<AccessListResult> {
-        unimplemented!()
+        (self.create_access_list_fn)(tx.clone(), block_id, state_overrides).await
     }
     async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>> {
         (self.get_logs_fn)(filter.clone()).await
@@ -453,4 +485,98 @@ async fn caller_cancellation_releases_pending_slot() {
     assert_eq!(counts.verified, 0);
 
     release.notify_one();
+}
+
+#[tokio::test]
+async fn provider_trait_call_routes_through_verified_path() {
+    let mock = MockHelios {
+        call_fn: Box::new(|_, _, _| async { Ok(Bytes::from_static(&[0xab, 0xcd])) }.boxed()),
+        ..Default::default()
+    };
+    let provider = build_provider(mock);
+
+    let tx = TxReq::default();
+    let bytes = Provider::<Ethereum>::call(&provider, tx).await.unwrap();
+    assert_eq!(bytes.as_ref(), &[0xab, 0xcd]);
+
+    let counts = provider.verification_status().counts().borrow().clone();
+    assert_eq!(counts.verified, 1);
+    assert_eq!(counts.failed, 0);
+}
+
+#[tokio::test]
+async fn provider_trait_estimate_gas_routes_through_verified_path() {
+    let mock = MockHelios {
+        estimate_gas_fn: Box::new(|_, _, _| async { Ok(21_000u64) }.boxed()),
+        ..Default::default()
+    };
+    let provider = build_provider(mock);
+
+    let tx = TxReq::default();
+    let gas = Provider::<Ethereum>::estimate_gas(&provider, tx)
+        .await
+        .unwrap();
+    assert_eq!(gas, 21_000);
+
+    let counts = provider.verification_status().counts().borrow().clone();
+    assert_eq!(counts.verified, 1);
+}
+
+#[tokio::test]
+async fn provider_trait_create_access_list_routes_through_verified_path() {
+    use alloy::eips::eip2930::{AccessList, AccessListItem};
+    let item = AccessListItem {
+        address: addr(33),
+        storage_keys: vec![B256::ZERO],
+    };
+    let expected = AccessListResult {
+        access_list: AccessList(vec![item]),
+        gas_used: U256::from(50_000),
+        error: None,
+    };
+    let expected_for_mock = expected.clone();
+    let mock = MockHelios {
+        create_access_list_fn: Box::new(move |_, _, _| {
+            let expected = expected_for_mock.clone();
+            async move { Ok(expected) }.boxed()
+        }),
+        ..Default::default()
+    };
+    let provider = build_provider(mock);
+
+    let tx = TxReq::default();
+    let result = Provider::<Ethereum>::create_access_list(&provider, &tx)
+        .await
+        .unwrap();
+    assert_eq!(result.gas_used, U256::from(50_000));
+    assert_eq!(result.access_list.0.len(), 1);
+
+    let counts = provider.verification_status().counts().borrow().clone();
+    assert_eq!(counts.verified, 1);
+}
+
+#[tokio::test]
+async fn provider_trait_call_with_block_overrides_is_refused() {
+    use alloy::rpc::types::BlockOverrides;
+    let mock = MockHelios {
+        call_fn: Box::new(|_, _, _| async { Ok(Bytes::new()) }.boxed()),
+        ..Default::default()
+    };
+    let provider = build_provider(mock);
+    let tx = TxReq::default();
+
+    let err = Provider::<Ethereum>::call(&provider, tx)
+        .with_block_overrides(BlockOverrides::default())
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("block_overrides"),
+        "expected block_overrides refusal, got: {msg}"
+    );
+
+    // Mock was never invoked since the override is refused before dispatch.
+    let counts = provider.verification_status().counts().borrow().clone();
+    assert_eq!(counts.verified, 0);
+    assert_eq!(counts.failed, 0);
 }
