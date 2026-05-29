@@ -265,7 +265,10 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             // informational stream. Empty receipts → no event (avoids
             // the type-confusing "eth_getBlockReceipts → VerifiedValue::Logs"
             // pairing the prior version produced).
-            |rs| rs.first().map(|r| VerifiedValue::Receipt(Box::new(r.clone()))),
+            |rs| {
+                rs.first()
+                    .map(|r| VerifiedValue::Receipt(Box::new(r.clone())))
+            },
         )
         .await
     }
@@ -430,11 +433,7 @@ impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
         })
     }
 
-    fn get_storage_at(
-        &self,
-        address: Address,
-        key: U256,
-    ) -> RpcWithBlock<(Address, U256), U256> {
+    fn get_storage_at(&self, address: Address, key: U256) -> RpcWithBlock<(Address, U256), U256> {
         let provider = self.clone();
         RpcWithBlock::new_provider(move |block_id| {
             let provider = provider.clone();

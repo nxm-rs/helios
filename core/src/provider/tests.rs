@@ -271,8 +271,14 @@ async fn failed_call_ticks_failed_counter_and_pushes_security_event() {
 #[tokio::test]
 async fn take_security_events_is_take_once() {
     let provider = build_provider(MockHelios::default());
-    assert!(provider.verification_status().take_security_events().is_some());
-    assert!(provider.verification_status().take_security_events().is_none());
+    assert!(provider
+        .verification_status()
+        .take_security_events()
+        .is_some());
+    assert!(provider
+        .verification_status()
+        .take_security_events()
+        .is_none());
 }
 
 #[tokio::test]
@@ -372,9 +378,7 @@ async fn barrier_with_timeout_reports_still_pending() {
         tokio::task::yield_now().await;
     }
 
-    let result = status
-        .barrier_with_timeout(Duration::from_millis(50))
-        .await;
+    let result = status.barrier_with_timeout(Duration::from_millis(50)).await;
     match result {
         Err(VerificationError::Timeout { still_pending }) => {
             assert_eq!(still_pending, 1);
@@ -436,8 +440,11 @@ async fn caller_cancellation_releases_pending_slot() {
     let provider = build_provider(mock);
     let status = provider.verification_status().clone();
 
-    let res = tokio::time::timeout(Duration::from_millis(50), provider.balance_verified(addr(22)))
-        .await;
+    let res = tokio::time::timeout(
+        Duration::from_millis(50),
+        provider.balance_verified(addr(22)),
+    )
+    .await;
     assert!(res.is_err(), "outer timeout should fire");
 
     let counts = status.counts().borrow().clone();
@@ -447,4 +454,3 @@ async fn caller_cancellation_releases_pending_slot() {
 
     release.notify_one();
 }
-
