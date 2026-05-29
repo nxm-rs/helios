@@ -2,8 +2,6 @@
   <img src=".github/banner.svg" alt="Nexum · helios — in-process Ethereum light client" width="100%" />
 </p>
 
-# Nexum · helios
-
 The **nxm-rs fork** of [a16z/helios](https://github.com/a16z/helios) — an in-process Ethereum light client that converts an untrusted centralised RPC into an unmanipulable local one by independently verifying every value against beacon-chain sync-committee signatures.
 
 This fork exists because the [Nexum wallet](https://github.com/nxm-rs/wallet) embeds Helios directly in its Rust core and needs a few changes that aren't yet upstream:
