@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::eips::BlockId;
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::eips::{BlockId, BlockNumberOrTag};
+use alloy::primitives::{Address, Bytes, B256, U128, U256, U64};
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 use alloy::rpc::types::state::StateOverride;
-use alloy::rpc::types::{AccessListResult, EIP1186AccountProofResponse, Filter, Log, SyncStatus};
+use alloy::rpc::types::{
+    AccessListResult, EIP1186AccountProofResponse, FeeHistory, Filter, Log, SyncStatus,
+};
 use alloy::transports::mock::Asserter;
 use async_trait::async_trait;
 use eyre::Result;
@@ -233,9 +235,19 @@ impl HeliosApi<Ethereum> for MockHelios {
 }
 
 fn build_provider(helios: MockHelios) -> VerifiedHeliosProvider<Ethereum> {
-    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(Asserter::new()));
+    build_provider_with_asserter(helios).0
+}
+
+fn build_provider_with_asserter(
+    helios: MockHelios,
+) -> (VerifiedHeliosProvider<Ethereum>, Asserter) {
+    let asserter = Asserter::new();
+    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter.clone()));
     let status = VerificationStatus::<Ethereum>::new();
-    VerifiedHeliosProvider::from_parts(Arc::new(helios), root, status)
+    (
+        VerifiedHeliosProvider::from_parts(Arc::new(helios), root, status),
+        asserter,
+    )
 }
 
 fn addr(byte: u8) -> Address {
@@ -591,4 +603,79 @@ async fn provider_trait_call_many_is_refused_not_silently_bypassed() {
         msg.contains("eth_callMany"),
         "expected eth_callMany refusal, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn gas_price_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U128::from(12_345u128));
+
+    let v = provider.gas_price_unverifiable().await.unwrap();
+    assert_eq!(v.method(), "eth_gasPrice");
+    assert_eq!(v.into_inner(), 12_345);
+
+    // Verification counters do not tick for unverifiable methods.
+    let counts = provider.verification_status().counts().borrow().clone();
+    assert_eq!(counts.verified, 0);
+    assert_eq!(counts.failed, 0);
+}
+
+#[tokio::test]
+async fn priority_fee_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U128::from(2_500_000_000u128));
+
+    let v = provider.priority_fee_unverifiable().await.unwrap();
+    assert_eq!(v.method(), "eth_maxPriorityFeePerGas");
+    assert_eq!(v.into_inner(), 2_500_000_000);
+}
+
+#[tokio::test]
+async fn blob_base_fee_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U128::from(1u128));
+
+    let v = provider.blob_base_fee_unverifiable().await.unwrap();
+    assert_eq!(v.method(), "eth_blobBaseFee");
+    assert_eq!(v.into_inner(), 1);
+}
+
+#[tokio::test]
+async fn block_number_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U64::from(19_000_000u64));
+
+    let v = provider.block_number_unverifiable().await.unwrap();
+    assert_eq!(v.method(), "eth_blockNumber");
+    assert_eq!(v.into_inner(), 19_000_000);
+}
+
+#[tokio::test]
+async fn chain_id_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U64::from(1u64));
+
+    let v = provider.chain_id_unverifiable().await.unwrap();
+    assert_eq!(v.method(), "eth_chainId");
+    assert_eq!(v.into_inner(), 1);
+}
+
+#[tokio::test]
+async fn fee_history_unverifiable_returns_wrapped_rpc_value() {
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    let expected = FeeHistory {
+        oldest_block: 18_999_995,
+        base_fee_per_gas: vec![10, 11, 12, 13, 14, 15],
+        gas_used_ratio: vec![0.5, 0.6, 0.7, 0.8, 0.9],
+        ..Default::default()
+    };
+    asserter.push_success(&expected);
+
+    let v = provider
+        .fee_history_unverifiable(5, BlockNumberOrTag::Latest, &[25.0, 75.0])
+        .await
+        .unwrap();
+    assert_eq!(v.method(), "eth_feeHistory");
+    assert_eq!(v.as_inner().oldest_block, 18_999_995);
+    assert_eq!(v.into_inner().gas_used_ratio.len(), 5);
 }
