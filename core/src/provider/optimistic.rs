@@ -632,7 +632,8 @@ impl<N: NetworkSpec> Caller<N, Bytes> for OptimisticHeliosProvider<N> {
                 "eth_call",
                 unverified.clone(),
                 move |h| async move {
-                    h.call(&tx_for_verifier, block, overrides_for_verifier).await
+                    h.call(&tx_for_verifier, block, overrides_for_verifier)
+                        .await
                 },
                 scalar_projection,
             );
@@ -687,7 +688,8 @@ impl<N: NetworkSpec> Caller<N, U64> for OptimisticHeliosProvider<N> {
                 "eth_estimateGas",
                 unverified,
                 move |h| async move {
-                    h.estimate_gas(&tx_for_verifier, block, overrides_for_verifier).await
+                    h.estimate_gas(&tx_for_verifier, block, overrides_for_verifier)
+                        .await
                 },
                 scalar_projection,
             );
