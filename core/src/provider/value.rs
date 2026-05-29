@@ -44,11 +44,26 @@ pub enum VerifiedValue<N: NetworkSpec> {
 /// makes the "I am trusting the RPC for this" assumption syntactically
 /// visible at the call site.
 ///
+/// `Debug` is implemented manually and **does not** expose the inner
+/// value — only the method name — so that `tracing::debug!(?x)`,
+/// `assert_eq!` failure messages, and panic dumps cannot accidentally
+/// surface a trusted value that the caller hasn't acknowledged via
+/// [`into_inner`].
+///
 /// [`into_inner`]: Unverifiable::into_inner
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Unverifiable<T> {
     value: T,
     method: &'static str,
+}
+
+impl<T> std::fmt::Debug for Unverifiable<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Unverifiable")
+            .field("method", &self.method)
+            .field("value", &"<call .into_inner() to acknowledge>")
+            .finish()
+    }
 }
 
 impl<T> Unverifiable<T> {

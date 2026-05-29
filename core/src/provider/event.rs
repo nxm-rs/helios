@@ -28,18 +28,17 @@ pub struct VerificationCounts {
 }
 
 /// Sticky terminal state of the provider, delivered via `watch::Receiver`.
+///
+/// The `Stalled` variant is a unit in this phase; the consensus
+/// supervisor (Phase 2f) reintroduces fields carrying the stall
+/// timestamp once a producer exists for them.
 #[derive(Debug, Clone, Default)]
 pub enum HealthStatus {
     #[default]
     Healthy,
-    /// Consensus client hasn't made progress for longer than the configured
-    /// stall threshold. The library auto-retries up to a bounded number of
-    /// times; this state remains until either recovery succeeds or
-    /// `on_exhausted` policy triggers.
-    Stalled {
-        since: Instant,
-        restart_attempts: u32,
-    },
+    /// Consensus client has not made progress for longer than the
+    /// configured stall threshold.
+    Stalled,
 }
 
 /// Security-critical events. Delivered via bounded `mpsc::Receiver`.
