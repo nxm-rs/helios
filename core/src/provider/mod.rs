@@ -50,6 +50,6 @@ pub use event::{
     VerificationEvent, VerifiedSnapshot,
 };
 pub use optimistic::OptimisticHeliosProvider;
-pub use status::VerificationStatus;
+pub use status::{Scope, VerificationStatus};
 pub use value::{Unverifiable, VerifiedValue};
 pub use verified::{ChainIdMismatch, VerifiedHeliosProvider};

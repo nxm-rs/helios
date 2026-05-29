@@ -970,3 +970,147 @@ async fn optimistic_get_transaction_receipt_some_none_mismatch_is_caught() {
 fn nonexistent_receipt() -> <Ethereum as alloy::network::Network>::ReceiptResponse {
     helios_test_utils::rpc_tx_receipt()
 }
+
+#[tokio::test]
+async fn scope_barrier_resolves_when_only_post_scope_calls_settle() {
+    // Provider has one call pending BEFORE the scope opens, and one
+    // pending AFTER. The scope's barrier should wait only for the post-
+    // scope call — the pre-scope call's outcome shouldn't gate the
+    // scope's barrier.
+    let release_pre = Arc::new(tokio::sync::Notify::new());
+    let release_post = Arc::new(tokio::sync::Notify::new());
+    let pre_for_mock = release_pre.clone();
+    let post_for_mock = release_post.clone();
+    let pre_addr = addr(50);
+    let mock = MockHelios {
+        get_balance_fn: Box::new(move |a, _| {
+            let pre = pre_for_mock.clone();
+            let post = post_for_mock.clone();
+            async move {
+                if a == pre_addr {
+                    pre.notified().await;
+                } else {
+                    post.notified().await;
+                }
+                Ok(U256::from(1))
+            }
+            .boxed()
+        }),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(1));
+    asserter.push_success(&U256::from(1));
+
+    // Pre-scope call: spawn and wait until it's registered as pending.
+    let p1 = provider.clone();
+    let pre_call = tokio::spawn(async move {
+        Provider::<Ethereum>::get_balance(&p1, addr(50)).await
+    });
+    while status.counts().borrow().pending == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let scope = status.scope();
+
+    // Post-scope call: spawn and wait until it's also pending.
+    let p2 = provider.clone();
+    let post_call = tokio::spawn(async move {
+        Provider::<Ethereum>::get_balance(&p2, addr(51)).await
+    });
+    while status.counts().borrow().pending < 2 {
+        tokio::task::yield_now().await;
+    }
+
+    // Open the scope barrier in the background, then release only the
+    // post-scope call. The scope barrier should resolve OK.
+    let scope_barrier = scope.barrier();
+    release_post.notify_one();
+    let r = scope_barrier.await;
+    assert!(r.is_ok(), "scope barrier should resolve after post-call settles, got {r:?}");
+
+    // Clean up: release the pre call so the test doesn't leak a task.
+    release_pre.notify_one();
+    let _ = pre_call.await;
+    let _ = post_call.await;
+}
+
+#[tokio::test]
+async fn scope_barrier_refuses_when_provider_is_tainted() {
+    // Taint via the optimistic provider, then open a scope after the
+    // taint and verify barrier refuses immediately. Taint is sticky
+    // across the entire provider — scopes don't escape it.
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(2)) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(1));
+
+    let _ = Provider::<Ethereum>::get_balance(&provider, addr(60)).await;
+    let mut health = status.health();
+    while !matches!(*health.borrow(), HealthStatus::Tainted { .. }) {
+        let _ = health.changed().await;
+    }
+
+    // Open scope AFTER taint. Barrier refuses immediately — taint is
+    // not scope-local.
+    let scope = status.scope();
+    let err = scope.barrier().await.unwrap_err();
+    assert!(matches!(err, VerificationError::Tainted), "got {err:?}");
+}
+
+#[tokio::test]
+async fn scope_barrier_with_timeout_counts_only_scope_pending() {
+    // Pre-scope call hangs; post-scope call hangs. barrier_with_timeout
+    // on the scope should report still_pending = 1 (the post-scope
+    // call), not 2 (the global pending count).
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_for_mock = release.clone();
+    let mock = MockHelios {
+        get_balance_fn: Box::new(move |_, _| {
+            let r = release_for_mock.clone();
+            async move {
+                r.notified().await;
+                Ok(U256::from(1))
+            }
+            .boxed()
+        }),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U256::from(1));
+    asserter.push_success(&U256::from(1));
+
+    let p1 = provider.clone();
+    let _pre = tokio::spawn(async move {
+        Provider::<Ethereum>::get_balance(&p1, addr(70)).await
+    });
+    while status.counts().borrow().pending == 0 {
+        tokio::task::yield_now().await;
+    }
+    let scope = status.scope();
+
+    let p2 = provider.clone();
+    let _post = tokio::spawn(async move {
+        Provider::<Ethereum>::get_balance(&p2, addr(71)).await
+    });
+    while status.counts().borrow().pending < 2 {
+        tokio::task::yield_now().await;
+    }
+
+    let result = scope
+        .barrier_with_timeout(Duration::from_millis(100))
+        .await;
+    match result {
+        Err(VerificationError::Timeout { still_pending }) => {
+            assert_eq!(
+                still_pending, 1,
+                "scope timeout should only count post-scope ids, got {still_pending}"
+            );
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+
+    release.notify_one();
+}
