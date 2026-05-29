@@ -57,6 +57,11 @@ pub enum SecurityEvent {
     /// on [`HealthStatus::Tainted`]; this carries the diagnostic detail.
     Mismatch(MismatchInfo),
     Failed(FailureInfo),
+    /// The embedder called
+    /// [`super::VerificationStatus::acknowledge_mismatch`], clearing
+    /// the `Tainted` state. Carried separately so an audit log can
+    /// distinguish "still tainted" from "operator acknowledged at T".
+    MismatchAcknowledged { at: Instant },
 }
 
 /// Informational verification events. Delivered via

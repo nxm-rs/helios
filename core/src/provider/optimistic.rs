@@ -103,15 +103,26 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
     /// the verified result against `unverified`; on divergence records a
     /// mismatch (which flips `HealthStatus::Tainted` synchronously
     /// before publishing the diagnostic event).
+    ///
+    /// The helios call is wrapped in `catch_unwind` so a panic in the
+    /// verifier (proof-decoding bug, arithmetic overflow, fuzzy input)
+    /// surfaces as `record_failed` with a descriptive `FailureInfo`
+    /// rather than silently leaving counters at "pending → drop →
+    /// Cancelled" — which would let a verifier-side bug hide behind
+    /// the noise of normal operation.
     fn spawn_verifier_get_balance(&self, address: Address, block_id: BlockId, unverified: U256) {
+        use futures::future::FutureExt;
         let handle = self.inner.status._bump_pending();
         let helios = self.inner.helios.clone();
         tokio::spawn(async move {
-            match helios.get_balance(address, block_id).await {
-                Ok(verified) if verified == unverified => {
+            let result = std::panic::AssertUnwindSafe(helios.get_balance(address, block_id))
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Ok(verified)) if verified == unverified => {
                     handle.record_verified();
                 }
-                Ok(verified) => {
+                Ok(Ok(verified)) => {
                     let info = MismatchInfo {
                         method: "eth_getBalance",
                         unverified: format!("{unverified:#x}").into_boxed_str(),
@@ -120,7 +131,7 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
                     };
                     handle.record_mismatch(info);
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     let info = FailureInfo {
                         method: "eth_getBalance",
                         error: err.to_string().into_boxed_str(),
@@ -128,7 +139,27 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
                     };
                     handle.record_failed(info);
                 }
+                Err(panic) => {
+                    let msg = panic_message(panic);
+                    let info = FailureInfo {
+                        method: "eth_getBalance",
+                        error: format!("verifier panicked: {msg}").into_boxed_str(),
+                        at: Instant::now(),
+                    };
+                    handle.record_failed(info);
+                }
             }
         });
+    }
+}
+
+/// Extract a string message from a [`std::panic::catch_unwind`] payload.
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
     }
 }
