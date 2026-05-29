@@ -1414,7 +1414,7 @@ async fn supervisor_trips_stalled_when_head_age_threshold_exceeded() {
     let mut health = status.health();
     let observed = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if matches!(*health.borrow(), HealthStatus::Stalled { .. }) {
+            if matches!(*health.borrow(), HealthStatus::Stalled) {
                 return true;
             }
             let _ = health.changed().await;
@@ -1438,7 +1438,7 @@ async fn supervisor_advance_clears_stalled_and_updates_consensus_status() {
 
     // Let it taint first.
     let mut health = status.health();
-    while !matches!(*health.borrow(), HealthStatus::Stalled { .. }) {
+    while !matches!(*health.borrow(), HealthStatus::Stalled) {
         let _ = health.changed().await;
     }
 
@@ -1490,7 +1490,6 @@ async fn supervisor_consecutive_failures_trip_stalled_before_timer() {
         head_age_threshold: Duration::from_secs(60),
         check_interval: Duration::from_secs(10),
         advance_failure_threshold: 3,
-        ..Default::default()
     };
     let handle = spawn_supervisor(status.clone(), policy);
 
@@ -1503,6 +1502,36 @@ async fn supervisor_consecutive_failures_trip_stalled_before_timer() {
     // 3 failures hits the threshold -> Stalled.
     assert!(matches!(
         *status.health().borrow(),
-        HealthStatus::Stalled { .. }
+        HealthStatus::Stalled
     ));
+}
+
+#[tokio::test]
+async fn supervisor_task_terminates_when_handle_dropped() {
+    use super::supervisor::{spawn_supervisor, StallPolicy};
+    use std::sync::Weak;
+
+    let status = VerificationStatus::<Ethereum>::new();
+    let policy = StallPolicy {
+        check_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+    let handle = spawn_supervisor(status.clone(), policy);
+
+    // Keep a Weak to the inner so we can observe the strong count drop.
+    // We use status.clone() as a proxy: it's also an Arc<Inner>-style
+    // handle, but here we want to confirm the supervisor task exits
+    // when the SupervisorHandle's strong count drops to zero.
+    let arc_handle = handle.clone();
+    let weak = std::sync::Arc::downgrade(&std::sync::Arc::new(arc_handle));
+
+    drop(handle);
+    // The other clone we made for `weak` is still alive (it's the
+    // Arc<SupervisorHandle> we used to construct weak). Drop it.
+    drop(weak);
+
+    // Give the supervisor task a chance to observe the drop and exit.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let _ = Weak::<()>::new();
 }

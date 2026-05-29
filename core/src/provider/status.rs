@@ -355,6 +355,15 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         let _ = self.inner.consensus_tx.send(status);
     }
 
+    /// Producer side: mutate consensus status in place. Lets the
+    /// supervisor update tip + head_age without struct-update-syntax
+    /// resetting other fields (checkpoint, is_synced) that a
+    /// different producer may have populated.
+    #[doc(hidden)]
+    pub fn _modify_consensus_status<F: FnOnce(&mut ConsensusStatus)>(&self, f: F) {
+        self.inner.consensus_tx.send_modify(f);
+    }
+
     /// Producer side: set health status. Called by the consensus
     /// supervisor when stall thresholds trip or recover.
     ///
