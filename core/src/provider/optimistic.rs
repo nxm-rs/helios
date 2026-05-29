@@ -29,9 +29,16 @@ use std::time::Instant;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockHash, Bytes, StorageKey, TxHash, B256, U256, U64};
-use alloy::providers::{EthGetBlock, Provider, ProviderCall, RootProvider, RpcWithBlock};
-use alloy::rpc::types::{BlockTransactionsKind, EIP1186AccountProofResponse, Filter, Log};
-use alloy::transports::TransportResult;
+use alloy::providers::{
+    Caller, EthCall, EthCallMany, EthCallManyParams, EthCallParams, EthGetBlock, Provider,
+    ProviderCall, RootProvider, RpcWithBlock,
+};
+use alloy::rpc::types::state::StateOverride;
+use alloy::rpc::types::{
+    AccessListResult, BlockTransactionsKind, Bundle, EIP1186AccountProofResponse, EthCallResponse,
+    Filter, Log,
+};
+use alloy::transports::{TransportErrorKind, TransportResult};
 use helios_common::network_spec::NetworkSpec;
 use serde::Serialize;
 
@@ -523,4 +530,180 @@ impl<N: NetworkSpec> Provider<N> for OptimisticHeliosProvider<N> {
             Ok(unverified)
         }))
     }
+
+    fn call(&self, tx: N::TransactionRequest) -> EthCall<N, Bytes> {
+        EthCall::call(self.clone(), tx).block(BlockId::pending())
+    }
+
+    fn estimate_gas(&self, tx: N::TransactionRequest) -> EthCall<N, U64, u64> {
+        fn u64_from(v: U64) -> u64 {
+            v.to::<u64>()
+        }
+        EthCall::gas_estimate(self.clone(), tx)
+            .block(BlockId::pending())
+            .map_resp(u64_from as fn(U64) -> u64)
+    }
+
+    fn create_access_list<'a>(
+        &self,
+        request: &'a N::TransactionRequest,
+    ) -> RpcWithBlock<&'a N::TransactionRequest, AccessListResult> {
+        let provider = self.clone();
+        let tx = request.clone();
+        RpcWithBlock::new_provider(move |block_id| {
+            let provider = provider.clone();
+            let tx = tx.clone();
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                let unverified = provider
+                    .inner
+                    .root
+                    .create_access_list(&tx)
+                    .block_id(block_id)
+                    .await?;
+                let tx_for_verifier = tx.clone();
+                provider.spawn_verifier(
+                    "eth_createAccessList",
+                    unverified.clone(),
+                    move |h| async move {
+                        h.create_access_list(&tx_for_verifier, block_id, None).await
+                    },
+                );
+                Ok(unverified)
+            }))
+        })
+    }
+}
+
+/// Block overrides aren't representable in helios's `HeliosApi::call` /
+/// `HeliosApi::estimate_gas` signatures today. The optimistic Caller
+/// would silently drop them on the verifier side, which would be a
+/// trust-model regression — better to refuse the call up front.
+fn reject_block_overrides<N: alloy::network::Network>(
+    params: &EthCallParams<N>,
+) -> TransportResult<()> {
+    if params.block_overrides().is_some() {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider does not support block_overrides on eth_call/eth_estimateGas",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+impl<N: NetworkSpec> Caller<N, Bytes> for OptimisticHeliosProvider<N> {
+    fn call(
+        &self,
+        params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Bytes>> {
+        reject_block_overrides(&params)?;
+        let provider = self.clone();
+        let block = params.block().unwrap_or_else(BlockId::pending);
+        let overrides = params.overrides().cloned();
+        let tx = params.into_data();
+        Ok(ProviderCall::BoxedFuture(Box::pin(async move {
+            let unverified = call_via_root(&provider, tx.clone(), block, overrides.clone()).await?;
+            let tx_for_verifier = tx;
+            let overrides_for_verifier = overrides;
+            provider.spawn_verifier(
+                "eth_call",
+                unverified.clone(),
+                move |h| async move {
+                    h.call(&tx_for_verifier, block, overrides_for_verifier).await
+                },
+            );
+            Ok(unverified)
+        })))
+    }
+
+    fn estimate_gas(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Bytes>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider: estimate_gas via Caller<N, Bytes> is unsupported; use Provider::estimate_gas",
+        ))
+    }
+
+    fn call_many(
+        &self,
+        _params: EthCallManyParams<'_>,
+    ) -> TransportResult<ProviderCall<EthCallManyParams<'static>, Bytes>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider does not implement eth_callMany",
+        ))
+    }
+}
+
+impl<N: NetworkSpec> Caller<N, U64> for OptimisticHeliosProvider<N> {
+    fn call(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, U64>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider: call via Caller<N, U64> is unsupported; use Provider::call",
+        ))
+    }
+
+    fn estimate_gas(
+        &self,
+        params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, U64>> {
+        reject_block_overrides(&params)?;
+        let provider = self.clone();
+        let block = params.block();
+        let overrides = params.overrides().cloned();
+        let tx = params.into_data();
+        Ok(ProviderCall::BoxedFuture(Box::pin(async move {
+            let unverified =
+                estimate_gas_via_root(&provider, tx.clone(), block, overrides.clone()).await?;
+            let tx_for_verifier = tx;
+            let overrides_for_verifier = overrides;
+            provider.spawn_verifier(
+                "eth_estimateGas",
+                unverified,
+                move |h| async move {
+                    h.estimate_gas(&tx_for_verifier, block, overrides_for_verifier).await
+                },
+            );
+            Ok(U64::from(unverified))
+        })))
+    }
+
+    fn call_many(
+        &self,
+        _params: EthCallManyParams<'_>,
+    ) -> TransportResult<ProviderCall<EthCallManyParams<'static>, U64>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider does not implement eth_callMany",
+        ))
+    }
+}
+
+async fn call_via_root<N: NetworkSpec>(
+    provider: &OptimisticHeliosProvider<N>,
+    tx: N::TransactionRequest,
+    block: BlockId,
+    overrides: Option<StateOverride>,
+) -> TransportResult<Bytes> {
+    provider
+        .inner
+        .root
+        .call(tx)
+        .block(block)
+        .overrides_opt(overrides)
+        .await
+}
+
+async fn estimate_gas_via_root<N: NetworkSpec>(
+    provider: &OptimisticHeliosProvider<N>,
+    tx: N::TransactionRequest,
+    block: Option<BlockId>,
+    overrides: Option<StateOverride>,
+) -> TransportResult<u64> {
+    let call = provider.inner.root.estimate_gas(tx);
+    let call = match block {
+        Some(b) => call.block(b),
+        None => call,
+    };
+    call.overrides_opt(overrides).await
 }
