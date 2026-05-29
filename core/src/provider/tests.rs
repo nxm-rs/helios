@@ -1022,9 +1022,14 @@ async fn scope_barrier_resolves_when_only_post_scope_calls_settle() {
         tokio::task::yield_now().await;
     }
 
-    // Open the scope barrier in the background, then release only the
-    // post-scope call. The scope barrier should resolve OK.
-    let scope_barrier = scope.barrier();
+    // Open the scope barrier and drive it to its first poll BEFORE
+    // releasing the post-scope call. Without the explicit poll, the
+    // snapshot inside barrier() runs at `.await` time — which would be
+    // AFTER `release_post.notify_one()` and AFTER the call settles,
+    // so the receiver list would be empty and `Ok` would result
+    // without the barrier actually waiting on anything.
+    let mut scope_barrier = Box::pin(scope.barrier());
+    let _ = futures::poll!(scope_barrier.as_mut());
     release_post.notify_one();
     let r = scope_barrier.await;
     assert!(r.is_ok(), "scope barrier should resolve after post-call settles, got {r:?}");
