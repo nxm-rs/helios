@@ -45,11 +45,7 @@ type EstimateFn = Box<
         + Sync,
 >;
 type AccessListFn = Box<
-    dyn Fn(
-            TxReq,
-            BlockId,
-            Option<StateOverride>,
-        ) -> BoxFuture<'static, Result<AccessListResult>>
+    dyn Fn(TxReq, BlockId, Option<StateOverride>) -> BoxFuture<'static, Result<AccessListResult>>
         + Send
         + Sync,
 >;
