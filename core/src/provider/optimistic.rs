@@ -567,11 +567,35 @@ impl<N: NetworkSpec> Provider<N> for OptimisticHeliosProvider<N> {
                     move |h| async move {
                         h.create_access_list(&tx_for_verifier, block_id, None).await
                     },
+                    access_list_projection,
                 );
                 Ok(unverified)
             }))
         })
     }
+
+    fn call_many<'req>(
+        &self,
+        bundles: &'req [Bundle],
+    ) -> EthCallMany<'req, N, Vec<Vec<EthCallResponse>>> {
+        // Same gap as VerifiedHeliosProvider: the alloy default for
+        // call_many routes via self.weak_client() bypassing every
+        // override. Override returns an EthCallMany backed by our
+        // refusing Caller<Vec<Vec<EthCallResponse>>>.
+        EthCallMany::new(self.clone(), bundles)
+    }
+}
+
+/// Projector for `AccessListResult`. Compares `access_list` and
+/// `gas_used` (consensus-anchored execution outputs). The `error`
+/// field is implementation-specific and not compared.
+fn access_list_projection(
+    u: &AccessListResult,
+    v: &AccessListResult,
+) -> ((U256, String), (U256, String)) {
+    let u_al = serde_json::to_string(&u.access_list).unwrap_or_default();
+    let v_al = serde_json::to_string(&v.access_list).unwrap_or_default();
+    ((u.gas_used, u_al), (v.gas_used, v_al))
 }
 
 /// Block overrides aren't representable in helios's `HeliosApi::call` /
@@ -610,6 +634,7 @@ impl<N: NetworkSpec> Caller<N, Bytes> for OptimisticHeliosProvider<N> {
                 move |h| async move {
                     h.call(&tx_for_verifier, block, overrides_for_verifier).await
                 },
+                scalar_projection,
             );
             Ok(unverified)
         })))
@@ -664,6 +689,7 @@ impl<N: NetworkSpec> Caller<N, U64> for OptimisticHeliosProvider<N> {
                 move |h| async move {
                     h.estimate_gas(&tx_for_verifier, block, overrides_for_verifier).await
                 },
+                scalar_projection,
             );
             Ok(U64::from(unverified))
         })))
@@ -706,4 +732,36 @@ async fn estimate_gas_via_root<N: NetworkSpec>(
         None => call,
     };
     call.overrides_opt(overrides).await
+}
+
+// Same call_many gap as VerifiedHeliosProvider: alloy's default
+// resolves via `weak_client()` and bypasses every override. Refusing
+// at the Caller layer surfaces the bypass as a clear error.
+impl<N: NetworkSpec> Caller<N, Vec<Vec<EthCallResponse>>> for OptimisticHeliosProvider<N> {
+    fn call(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider: Caller<Vec<Vec<EthCallResponse>>>::call is unsupported",
+        ))
+    }
+
+    fn estimate_gas(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider: Caller<Vec<Vec<EthCallResponse>>>::estimate_gas is unsupported",
+        ))
+    }
+
+    fn call_many(
+        &self,
+        _params: EthCallManyParams<'_>,
+    ) -> TransportResult<ProviderCall<EthCallManyParams<'static>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "OptimisticHeliosProvider does not implement eth_callMany — helios cannot back the per-bundle verified path; fan out via Provider::call per bundle if needed",
+        ))
+    }
 }
