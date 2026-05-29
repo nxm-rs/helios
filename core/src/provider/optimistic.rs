@@ -223,12 +223,14 @@ fn transaction_projection<N: NetworkSpec>(
     )
 }
 
+type EncodedReceipts = Option<Vec<Vec<u8>>>;
+
 /// Projector for `Vec<Receipt>` from `eth_getBlockReceipts`. Compares
 /// each receipt via consensus-defined encoding.
 fn block_receipts_projection<N: NetworkSpec>(
     u: &Option<Vec<N::ReceiptResponse>>,
     v: &Option<Vec<N::ReceiptResponse>>,
-) -> (Option<Vec<Vec<u8>>>, Option<Vec<Vec<u8>>>) {
+) -> (EncodedReceipts, EncodedReceipts) {
     (
         u.as_ref()
             .map(|rs| rs.iter().map(N::encode_receipt).collect()),
