@@ -151,12 +151,11 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
                     if u_repr == v_repr {
                         handle.record_verified();
                     } else {
-                        handle.record_mismatch(MismatchInfo {
+                        handle.record_mismatch(MismatchInfo::now(
                             method,
-                            unverified: format!("{u_repr:?}").into_boxed_str(),
-                            verified: format!("{v_repr:?}").into_boxed_str(),
-                            at: Instant::now(),
-                        });
+                            format!("{u_repr:?}"),
+                            format!("{v_repr:?}"),
+                        ));
                     }
                 }
                 Ok(Err(err)) => {

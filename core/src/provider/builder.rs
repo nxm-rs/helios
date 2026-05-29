@@ -7,7 +7,9 @@ use alloy::providers::{DynProvider, RootProvider};
 use helios_common::network_spec::NetworkSpec;
 
 use crate::client::api::HeliosApi;
+use crate::provider::event::HealthStatus;
 use crate::provider::optimistic::OptimisticHeliosProvider;
+use crate::provider::persistence::{spawn_taint_persistence, TaintConfig};
 use crate::provider::status::VerificationStatus;
 use crate::provider::verified::VerifiedHeliosProvider;
 
@@ -40,6 +42,7 @@ pub struct HeliosProviderBuilder<N: NetworkSpec> {
     root: RootProvider<N>,
     status: Option<VerificationStatus<N>>,
     routing: Routing,
+    taint_config: Option<TaintConfig>,
 }
 
 impl<N: NetworkSpec> HeliosProviderBuilder<N> {
@@ -52,6 +55,7 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
             root,
             status: None,
             routing: Routing::default(),
+            taint_config: None,
         }
     }
 
@@ -70,6 +74,25 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
         self
     }
 
+    /// Configure how verifier taint persists across process restarts.
+    /// Defaults to [`TaintConfig::PerSession`] (no persistence).
+    ///
+    /// When set to a persisting variant ([`TaintConfig::DataDir`] or
+    /// [`TaintConfig::Custom`]), [`Self::build`] / [`Self::build_with_status`]:
+    ///
+    /// 1. Load any existing mismatch from the store and pre-flip
+    ///    `health()` to [`HealthStatus::Tainted`] *before* returning,
+    ///    so the very first caller cannot race a verified read past a
+    ///    persisted taint.
+    /// 2. Spawn a background task that subscribes to `health()` and
+    ///    writes to the store on each Tainted transition / clears it
+    ///    when `acknowledge_mismatch` is called. File I/O happens on
+    ///    `spawn_blocking` so the runtime isn't blocked.
+    pub fn taint_config(mut self, config: TaintConfig) -> Self {
+        self.taint_config = Some(config);
+        self
+    }
+
     /// Build the [`DynProvider<N>`] selected by [`Routing`]. The
     /// underlying [`VerificationStatus`] is constructed if not provided
     /// but is not returned — use [`Self::build_with_status`] when you
@@ -82,6 +105,16 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
     /// [`VerificationStatus`] alongside.
     pub fn build_with_status(self) -> (DynProvider<N>, VerificationStatus<N>) {
         let status = self.status.unwrap_or_default();
+
+        if let Some(store) = self.taint_config.and_then(TaintConfig::into_store) {
+            if let Ok(Some(info)) = store.load() {
+                status._set_health(HealthStatus::Tainted {
+                    first_mismatch: Box::new(info),
+                });
+            }
+            spawn_taint_persistence(&status, store);
+        }
+
         let provider = match self.routing {
             Routing::VerifiedOnly => DynProvider::new(VerifiedHeliosProvider::from_parts(
                 self.helios,
