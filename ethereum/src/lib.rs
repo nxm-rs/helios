@@ -17,7 +17,7 @@ pub use builder::EthereumClientBuilder;
 pub type EthereumClient = HeliosClient<Ethereum>;
 
 pub use helios_core::provider::{
-    FailureInfo, HealthStatus, MismatchInfo, OptimisticHeliosProvider, Scope, SecurityEvent,
-    Unverifiable, VerificationCounts, VerificationError, VerificationEvent, VerificationStatus,
-    VerifiedHeliosProvider, VerifiedValue,
+    FailureInfo, HealthStatus, HeliosProviderBuilder, MismatchInfo, OptimisticHeliosProvider,
+    Routing, Scope, SecurityEvent, Unverifiable, VerificationCounts, VerificationError,
+    VerificationEvent, VerificationStatus, VerifiedHeliosProvider, VerifiedValue,
 };

@@ -34,6 +34,7 @@
 //! [`Provider<N>`]: alloy::providers::Provider
 //! [`Unverifiable<T>`]: value::Unverifiable
 
+pub mod builder;
 pub mod error;
 pub mod event;
 pub mod optimistic;
@@ -44,6 +45,7 @@ pub mod verified;
 #[cfg(test)]
 mod tests;
 
+pub use builder::{HeliosProviderBuilder, Routing};
 pub use error::{FailureInfo, MismatchInfo, VerificationError};
 pub use event::{
     ConsensusStatus, HealthStatus, SecurityEvent, SkipReason, VerificationCounts,
