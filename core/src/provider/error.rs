@@ -1,6 +1,9 @@
 //! Error type returned by verified-path operations.
 
-use std::time::Instant;
+use std::borrow::Cow;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 /// Error returned by verified-path operations on the helios provider.
 #[derive(Debug, Clone)]
@@ -39,15 +42,47 @@ pub struct FailureInfo {
 /// values are JSON-serialised for diagnostic display so the struct can
 /// be `Clone + Send + 'static` without depending on each method's
 /// response type at the trait level.
-#[derive(Debug, Clone)]
+///
+/// `Serialize` / `Deserialize` are derived so the struct can be
+/// persisted to disk via a [`super::TaintStore`]. `method` is a
+/// [`Cow<'static, str>`] so producers pass static literals at zero
+/// cost (`"eth_getBalance".into()` is a `Cow::Borrowed`); values
+/// restored from disk are `Cow::Owned`. `at_unix_ms` is the absolute
+/// wall-clock time the mismatch was first observed, in milliseconds
+/// since the unix epoch — chosen over [`Instant`] because
+/// `MismatchInfo` outlives the process across restarts, and absolute
+/// time is what diagnostic UIs actually want anyway.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MismatchInfo {
-    pub method: &'static str,
-    /// JSON-serialised unverified value. Boxed `str` keeps the enum's
+    pub method: Cow<'static, str>,
+    /// JSON-serialised unverified value. Boxed `str` keeps the struct
     /// stack footprint bounded; large values (full blocks, receipts)
     /// would otherwise blow the size.
     pub unverified: Box<str>,
     pub verified: Box<str>,
-    pub at: Instant,
+    pub at_unix_ms: u64,
+}
+
+impl MismatchInfo {
+    /// Construct a [`MismatchInfo`] for `method` with the unverified
+    /// and verified values, stamping `at_unix_ms` with the current
+    /// wall-clock time. Producers should use this rather than
+    /// constructing the struct directly.
+    pub fn now(
+        method: impl Into<Cow<'static, str>>,
+        unverified: impl Into<Box<str>>,
+        verified: impl Into<Box<str>>,
+    ) -> Self {
+        Self {
+            method: method.into(),
+            unverified: unverified.into(),
+            verified: verified.into(),
+            at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
 }
 
 impl std::fmt::Display for VerificationError {
