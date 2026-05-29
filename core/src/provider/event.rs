@@ -61,7 +61,9 @@ pub enum SecurityEvent {
     /// [`super::VerificationStatus::acknowledge_mismatch`], clearing
     /// the `Tainted` state. Carried separately so an audit log can
     /// distinguish "still tainted" from "operator acknowledged at T".
-    MismatchAcknowledged { at: Instant },
+    MismatchAcknowledged {
+        at: Instant,
+    },
 }
 
 /// Informational verification events. Delivered via
