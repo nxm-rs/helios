@@ -91,8 +91,45 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
             Routing::OptimisticThenVerified => DynProvider::new(
                 OptimisticHeliosProvider::from_parts(self.helios, self.root, status.clone()),
             ),
-            Routing::RpcThenVerified => DynProvider::new(self.root),
+            // Wrap RootProvider in RpcOnlyHeliosProvider so the
+            // returned provider holds a clone of the VerificationStatus.
+            // Without the clone, callers using build() (which drops the
+            // returned status) would lose the status sender as soon as
+            // build() returns — breaking any background subscriber (e.g.
+            // the taint-persistence task added in a later PR).
+            Routing::RpcThenVerified => DynProvider::new(RpcOnlyHeliosProvider::new(
+                self.root,
+                status.clone(),
+            )),
         };
         (provider, status)
+    }
+}
+
+/// Thin wrapper around [`RootProvider<N>`] that holds a
+/// [`VerificationStatus<N>`] clone alongside the inner provider.
+/// Implements [`Provider<N>`] by delegating to the inner root, so the
+/// dispatch behaviour is identical to a bare `RootProvider<N>` — the
+/// only difference is that the held status clone keeps the
+/// `VerificationStatus<N>` sender alive across `build()`'s drop of the
+/// returned tuple's `.1`.
+#[derive(Clone)]
+struct RpcOnlyHeliosProvider<N: NetworkSpec> {
+    root: RootProvider<N>,
+    _status: VerificationStatus<N>,
+}
+
+impl<N: NetworkSpec> RpcOnlyHeliosProvider<N> {
+    fn new(root: RootProvider<N>, status: VerificationStatus<N>) -> Self {
+        Self {
+            root,
+            _status: status,
+        }
+    }
+}
+
+impl<N: NetworkSpec> alloy::providers::Provider<N> for RpcOnlyHeliosProvider<N> {
+    fn root(&self) -> &RootProvider<N> {
+        &self.root
     }
 }
