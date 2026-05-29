@@ -1191,3 +1191,99 @@ async fn builder_rpc_then_verified_skips_helios_entirely() {
     assert_eq!(counts.failed, 0);
     assert_eq!(counts.pending, 0);
 }
+
+#[tokio::test]
+async fn optimistic_provider_call_returns_unverified_immediately() {
+    let mock = MockHelios {
+        call_fn: Box::new(|_, _, _| async { Ok(Bytes::from_static(&[0xfe])) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&Bytes::from_static(&[0xab]));
+
+    let v = Provider::<Ethereum>::call(&provider, TxReq::default())
+        .await
+        .unwrap();
+    assert_eq!(v.as_ref(), &[0xab], "caller sees the unverified value");
+
+    // Background verifier observes the mismatch (helios said 0xfe).
+    let mut counts = status.counts();
+    while counts.borrow().mismatched == 0 {
+        let _ = counts.changed().await;
+    }
+    assert_eq!(counts.borrow().mismatched, 1);
+}
+
+#[tokio::test]
+async fn optimistic_provider_estimate_gas_matching_value_ticks_verified() {
+    let mock = MockHelios {
+        estimate_gas_fn: Box::new(|_, _, _| async { Ok(21_000u64) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&U64::from(21_000u64));
+
+    let gas = Provider::<Ethereum>::estimate_gas(&provider, TxReq::default())
+        .await
+        .unwrap();
+    assert_eq!(gas, 21_000);
+
+    let mut counts = status.counts();
+    while counts.borrow().verified == 0 {
+        let _ = counts.changed().await;
+    }
+    assert_eq!(counts.borrow().verified, 1);
+    assert_eq!(counts.borrow().mismatched, 0);
+}
+
+#[tokio::test]
+async fn optimistic_provider_create_access_list_matching_value_ticks_verified() {
+    use alloy::eips::eip2930::{AccessList, AccessListItem};
+    let item = AccessListItem {
+        address: addr(90),
+        storage_keys: vec![B256::ZERO],
+    };
+    let expected = AccessListResult {
+        access_list: AccessList(vec![item]),
+        gas_used: U256::from(50_000),
+        error: None,
+    };
+    let expected_for_mock = expected.clone();
+    let mock = MockHelios {
+        create_access_list_fn: Box::new(move |_, _, _| {
+            let e = expected_for_mock.clone();
+            async move { Ok(e) }.boxed()
+        }),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&expected);
+
+    let r = Provider::<Ethereum>::create_access_list(&provider, &TxReq::default())
+        .await
+        .unwrap();
+    assert_eq!(r.gas_used, U256::from(50_000));
+
+    let mut counts = status.counts();
+    while counts.borrow().verified == 0 {
+        let _ = counts.changed().await;
+    }
+    assert_eq!(counts.borrow().verified, 1);
+}
+
+#[tokio::test]
+async fn optimistic_provider_call_with_block_overrides_is_refused() {
+    use alloy::rpc::types::BlockOverrides;
+    let (provider, _, status) = build_optimistic_with_asserter(MockHelios::default());
+
+    let err = Provider::<Ethereum>::call(&provider, TxReq::default())
+        .with_block_overrides(BlockOverrides::default())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("block_overrides"),
+        "expected refusal, got: {err}"
+    );
+    // Verifier never spawned.
+    assert_eq!(status.counts().borrow().pending, 0);
+}
