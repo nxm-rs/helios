@@ -1391,6 +1391,9 @@ async fn builder_data_dir_preserves_taint_across_restart() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-        assert!(entries.is_empty(), "acknowledge_mismatch should clear the store");
+        assert!(
+            entries.is_empty(),
+            "acknowledge_mismatch should clear the store"
+        );
     }
 }
