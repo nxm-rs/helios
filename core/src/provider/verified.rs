@@ -89,13 +89,39 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
 
     /// Block until the verified-receipt for this tx hash is observed.
     /// Wrap in [`tokio::time::timeout`] for a bounded wait.
+    ///
+    /// Intermediate "receipt not yet present" polls do not tick the
+    /// verification counters or emit verbose events — only the terminal
+    /// success goes through the verified accounting path. This avoids
+    /// inflating `counts.verified` by ~120 per minute while a user waits
+    /// for a transaction to land.
     pub async fn verified_receipt(
         &self,
         hash: TxHash,
     ) -> Result<N::ReceiptResponse, VerificationError> {
         loop {
-            if let Some(r) = self.transaction_receipt_verified(hash).await? {
-                return Ok(r);
+            // Poll helios directly to avoid bumping the pending/verified
+            // counters on every retry. We re-enter the accounted path
+            // (`transaction_receipt_verified`) for the terminal success
+            // so the verbose event still carries the receipt payload.
+            match self.inner.helios.get_transaction_receipt(hash).await {
+                Ok(Some(_)) => {
+                    if let Some(r) = self.transaction_receipt_verified(hash).await? {
+                        return Ok(r);
+                    }
+                    // Race: receipt vanished between the unaccounted poll
+                    // and the accounted re-fetch. Continue polling.
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(VerificationError::Failed {
+                        calls: vec![FailureInfo {
+                            method: "eth_getTransactionReceipt",
+                            error: err.to_string().into_boxed_str(),
+                            at: Instant::now(),
+                        }],
+                    });
+                }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -165,7 +191,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         self.run_verified_opt(
             "eth_getBlockByHash",
             |h| async move { h.get_block(BlockId::Hash(hash.into()), full_tx).await },
-            |b| VerifiedValue::Block(Box::new(b.clone())),
+            |b| Some(VerifiedValue::Block(Box::new(b.clone()))),
         )
         .await
     }
@@ -179,7 +205,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         self.run_verified_opt(
             "eth_getTransactionReceipt",
             |h| async move { h.get_transaction_receipt(hash).await },
-            |r| VerifiedValue::Receipt(Box::new(r.clone())),
+            |r| Some(VerifiedValue::Receipt(Box::new(r.clone()))),
         )
         .await
     }
@@ -193,7 +219,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         self.run_verified_opt(
             "eth_getBlockByNumber",
             |h| async move { h.get_block(block_id, full_tx).await },
-            |b| VerifiedValue::Block(Box::new(b.clone())),
+            |b| Some(VerifiedValue::Block(Box::new(b.clone()))),
         )
         .await
     }
@@ -221,7 +247,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
         self.run_verified_opt(
             "eth_getTransactionByHash",
             |h| async move { h.get_transaction(hash).await },
-            |t| VerifiedValue::Transaction(Box::new(t.clone())),
+            |t| Some(VerifiedValue::Transaction(Box::new(t.clone()))),
         )
         .await
     }
@@ -236,11 +262,10 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             |h| async move { h.get_block_receipts(block_id).await },
             // The verbose event carries only the first receipt as a sample;
             // shipping the whole vector would be wasteful for a chatty
-            // informational stream.
-            |rs| match rs.first() {
-                Some(r) => VerifiedValue::Receipt(Box::new(r.clone())),
-                None => VerifiedValue::Logs(Vec::new()),
-            },
+            // informational stream. Empty receipts → no event (avoids
+            // the type-confusing "eth_getBlockReceipts → VerifiedValue::Logs"
+            // pairing the prior version produced).
+            |rs| rs.first().map(|r| VerifiedValue::Receipt(Box::new(r.clone()))),
         )
         .await
     }
@@ -265,13 +290,13 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             Ok(value) => {
                 let took = started.elapsed();
                 handle.record_verified();
-                self.inner
-                    .status
-                    ._emit_verbose_with(|| VerificationEvent::Verified {
+                self.inner.status._emit_verbose_with(|| {
+                    Some(VerificationEvent::Verified {
                         method,
                         value: make_value(&value),
                         took,
-                    });
+                    })
+                });
                 Ok(value)
             }
             Err(err) => {
@@ -288,6 +313,11 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
 
     /// `Option<T>`-returning sibling of [`Self::run_verified`]. The
     /// `Verified` event only carries a payload for the `Some` case.
+    /// The `make_value` closure returns `Option<VerifiedValue<N>>` so
+    /// callers whose payload is semantically empty (e.g. an empty
+    /// receipts vec) can return `None` to skip the verbose event rather
+    /// than emit a misleading sentinel like `VerifiedValue::Logs(vec![])`
+    /// for an `eth_getBlockReceipts` event.
     async fn run_verified_opt<T, F, Fut, M>(
         &self,
         method: &'static str,
@@ -297,7 +327,7 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
     where
         F: FnOnce(Arc<dyn HeliosApi<N>>) -> Fut,
         Fut: std::future::Future<Output = eyre::Result<Option<T>>>,
-        M: FnOnce(&T) -> VerifiedValue<N>,
+        M: FnOnce(&T) -> Option<VerifiedValue<N>>,
     {
         let started = Instant::now();
         let handle = self.inner.status._bump_pending();
@@ -305,13 +335,13 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             Ok(Some(value)) => {
                 let took = started.elapsed();
                 handle.record_verified();
-                self.inner
-                    .status
-                    ._emit_verbose_with(|| VerificationEvent::Verified {
+                self.inner.status._emit_verbose_with(|| {
+                    make_value(&value).map(|v| VerificationEvent::Verified {
                         method,
-                        value: make_value(&value),
+                        value: v,
                         took,
-                    });
+                    })
+                });
                 Ok(Some(value))
             }
             Ok(None) => {
