@@ -97,10 +97,9 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
             // returned status) would lose the status sender as soon as
             // build() returns — breaking any background subscriber (e.g.
             // the taint-persistence task added in a later PR).
-            Routing::RpcThenVerified => DynProvider::new(RpcOnlyHeliosProvider::new(
-                self.root,
-                status.clone(),
-            )),
+            Routing::RpcThenVerified => {
+                DynProvider::new(RpcOnlyHeliosProvider::new(self.root, status.clone()))
+            }
         };
         (provider, status)
     }
