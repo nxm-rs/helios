@@ -829,12 +829,7 @@ async fn acknowledge_mismatch_clears_tainted_only() {
     assert!(matches!(*status.health().borrow(), HealthStatus::Healthy));
 
     // Force Tainted via the producer surface.
-    let info = MismatchInfo {
-        method: "eth_getBalance",
-        unverified: "0x1".into(),
-        verified: "0x2".into(),
-        at: std::time::Instant::now(),
-    };
+    let info = MismatchInfo::now("eth_getBalance", "0x1", "0x2");
     let handle = status._bump_pending();
     handle.record_mismatch(info);
     assert!(matches!(
@@ -1302,4 +1297,110 @@ async fn optimistic_provider_call_many_is_refused_not_silently_bypassed() {
         msg.contains("eth_callMany"),
         "expected eth_callMany refusal, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn file_taint_store_roundtrip() {
+    use super::persistence::FileTaintStore;
+    use super::persistence::TaintStore;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = FileTaintStore::new(tmp.path().to_path_buf(), "https://eth.test/rpc", 1);
+
+    // Empty store -> None.
+    assert!(store.load().unwrap().is_none());
+
+    // Save and reload.
+    let info = MismatchInfo::now("eth_getBalance", "0x1", "0x2");
+    store.save(&info).unwrap();
+    let loaded = store.load().unwrap().unwrap();
+    assert_eq!(loaded.method.as_ref(), "eth_getBalance");
+    assert_eq!(loaded.unverified.as_ref(), "0x1");
+    assert_eq!(loaded.verified.as_ref(), "0x2");
+    assert_eq!(loaded.at_unix_ms, info.at_unix_ms);
+
+    // Clear -> None again.
+    store.clear().unwrap();
+    assert!(store.load().unwrap().is_none());
+
+    // Clear on missing is OK.
+    store.clear().unwrap();
+}
+
+#[tokio::test]
+async fn builder_data_dir_preserves_taint_across_restart() {
+    use super::builder::{HeliosProviderBuilder, Routing};
+    use super::persistence::TaintConfig;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let rpc = "https://eth.test/rpc".to_string();
+    let chain_id = 1u64;
+
+    // Session 1: build the optimistic provider with DataDir persistence,
+    // observe a mismatch, drop the provider.
+    {
+        let mock = MockHelios {
+            get_balance_fn: Box::new(|_, _| async { Ok(U256::from(2)) }.boxed()),
+            ..Default::default()
+        };
+        let asserter = Asserter::new();
+        asserter.push_success(&U256::from(1));
+        let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter));
+        let (provider, status) = HeliosProviderBuilder::new(Arc::new(mock), root)
+            .routing(Routing::OptimisticThenVerified)
+            .taint_config(TaintConfig::DataDir {
+                dir: dir.clone(),
+                rpc_url: rpc.clone(),
+                chain_id,
+            })
+            .build_with_status();
+
+        let _ = Provider::<Ethereum>::get_balance(&provider, addr(100)).await;
+        let mut health = status.health();
+        while !matches!(*health.borrow(), HealthStatus::Tainted { .. }) {
+            let _ = health.changed().await;
+        }
+        // Give the persistence task a moment to write the file.
+        for _ in 0..50 {
+            if std::fs::read_dir(&dir).unwrap().count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // Session 2: build a fresh provider with the same store config and
+    // confirm health() is Tainted at startup before any call is made.
+    {
+        let mock = MockHelios::default();
+        let asserter = Asserter::new();
+        let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter));
+        let (_provider, status) = HeliosProviderBuilder::new(Arc::new(mock), root)
+            .routing(Routing::VerifiedOnly)
+            .taint_config(TaintConfig::DataDir {
+                dir: dir.clone(),
+                rpc_url: rpc.clone(),
+                chain_id,
+            })
+            .build_with_status();
+
+        assert!(
+            matches!(*status.health().borrow(), HealthStatus::Tainted { .. }),
+            "persisted taint should be restored at builder time"
+        );
+
+        // Acknowledge clears the on-disk record.
+        status.acknowledge_mismatch();
+        // Give the persistence task a moment to clear the file.
+        for _ in 0..50 {
+            let mut entries = std::fs::read_dir(&dir).unwrap();
+            if entries.next().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(entries.is_empty(), "acknowledge_mismatch should clear the store");
+    }
 }

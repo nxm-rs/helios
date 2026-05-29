@@ -38,6 +38,7 @@ pub mod builder;
 pub mod error;
 pub mod event;
 pub mod optimistic;
+pub mod persistence;
 pub mod status;
 pub mod value;
 pub mod verified;
@@ -52,6 +53,7 @@ pub use event::{
     VerificationEvent, VerifiedSnapshot,
 };
 pub use optimistic::OptimisticHeliosProvider;
+pub use persistence::{FileTaintStore, TaintConfig, TaintStore};
 pub use status::{Scope, VerificationStatus};
 pub use value::{Unverifiable, VerifiedValue};
 pub use verified::{ChainIdMismatch, VerifiedHeliosProvider};
