@@ -18,9 +18,9 @@ use helios_ethereum::spec::Ethereum;
 
 use super::error::{MismatchInfo, VerificationError};
 use super::event::{HealthStatus, SecurityEvent, VerificationEvent};
+use super::optimistic::OptimisticHeliosProvider;
 use super::status::VerificationStatus;
 use super::value::VerifiedValue;
-use super::optimistic::OptimisticHeliosProvider;
 use super::verified::VerifiedHeliosProvider;
 use crate::client::api::HeliosApi;
 
@@ -714,7 +714,11 @@ async fn assert_chain_id_matches_helios_errors_on_mismatch() {
 
 fn build_optimistic_with_asserter(
     helios: MockHelios,
-) -> (OptimisticHeliosProvider<Ethereum>, Asserter, VerificationStatus<Ethereum>) {
+) -> (
+    OptimisticHeliosProvider<Ethereum>,
+    Asserter,
+    VerificationStatus<Ethereum>,
+) {
     let asserter = Asserter::new();
     let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter.clone()));
     let status = VerificationStatus::<Ethereum>::new();
@@ -749,16 +753,13 @@ async fn optimistic_matching_value_ticks_verified_and_stays_healthy() {
     assert_eq!(snapshot.verified, 1);
     assert_eq!(snapshot.mismatched, 0);
     assert_eq!(snapshot.failed, 0);
-    assert!(matches!(
-        *status.health().borrow(),
-        HealthStatus::Healthy
-    ));
+    assert!(matches!(*status.health().borrow(), HealthStatus::Healthy));
 }
 
 #[tokio::test]
 async fn optimistic_mismatch_flips_tainted_before_security_event() {
     // Mock helios returns 200; asserter (unverified RPC) returns 100.
-    // Optimistic flow: caller sees 100 (unverified), background 
+    // Optimistic flow: caller sees 100 (unverified), background
     // verifier sees 200 from helios -> mismatch.
     let mock = MockHelios {
         get_balance_fn: Box::new(|_, _| async { Ok(U256::from(200)) }.boxed()),
@@ -850,10 +851,7 @@ async fn acknowledge_mismatch_does_not_clobber_stalled() {
     let status = VerificationStatus::<Ethereum>::new();
     status._set_health(HealthStatus::Stalled);
     status.acknowledge_mismatch();
-    assert!(matches!(
-        *status.health().borrow(),
-        HealthStatus::Stalled
-    ));
+    assert!(matches!(*status.health().borrow(), HealthStatus::Stalled));
 }
 
 #[tokio::test]
