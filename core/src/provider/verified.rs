@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alloy::eips::BlockId;
+use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, BlockHash, Bytes, StorageKey, TxHash, B256, U256, U64};
 use alloy::providers::{
     Caller, EthCall, EthCallMany, EthCallManyParams, EthCallParams, EthGetBlock, Provider,
@@ -20,7 +20,7 @@ use alloy::providers::{
 use alloy::rpc::types::state::StateOverride;
 use alloy::rpc::types::{
     AccessListResult, BlockTransactionsKind, Bundle, EIP1186AccountProofResponse, EthCallResponse,
-    Filter, Log,
+    FeeHistory, Filter, Log,
 };
 use alloy::transports::{TransportErrorKind, TransportResult};
 use helios_common::network_spec::NetworkSpec;
@@ -29,7 +29,7 @@ use crate::client::api::HeliosApi;
 use crate::provider::error::{FailureInfo, VerificationError};
 use crate::provider::event::VerificationEvent;
 use crate::provider::status::VerificationStatus;
-use crate::provider::value::VerifiedValue;
+use crate::provider::value::{Unverifiable, VerifiedValue};
 
 /// Verified-blocking helios provider — drop-in `alloy::providers::Provider<N>`.
 ///
@@ -41,10 +41,14 @@ use crate::provider::value::VerifiedValue;
 /// `call`, `estimate_gas`, `create_access_list`.
 ///
 /// Methods that fall through to the unverified RPC via `RootProvider<N>`:
-/// methods that helios cannot back at all (gas estimators, fee history,
-/// `block_number` at tip, mempool subscriptions). The
-/// [`Unverifiable<T>`] wrapper is the planned escape hatch for that
-/// group at the inherent-method layer.
+/// methods that helios cannot back at all (mempool subscriptions, raw
+/// filter queries, etc.). For the gas / fee / tip / chain-id family
+/// (`eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_blobBaseFee`,
+/// `eth_feeHistory`, `eth_blockNumber`, `eth_chainId`) the
+/// trait-default methods still forward to the unverified RPC, but
+/// inherent `*_unverifiable` methods returning [`Unverifiable<T>`]
+/// give consumers a syntactic acknowledgement that they are trusting
+/// the upstream.
 ///
 /// Cheap to clone — internally just an `Arc<Inner<N>>`.
 ///
@@ -322,6 +326,69 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
             |v| VerifiedValue::AccessList(Box::new(v.clone())),
         )
         .await
+    }
+
+    /// Current gas price as the upstream RPC reports it. Wrapped in
+    /// [`Unverifiable`] because helios cannot anchor the node's chosen
+    /// `eth_gasPrice` heuristic against consensus — gas price is a
+    /// node-local market estimate, not consensus-anchored state.
+    pub async fn gas_price_unverifiable(&self) -> TransportResult<Unverifiable<u128>> {
+        let v = self.inner.root.get_gas_price().await?;
+        Ok(Unverifiable::new(v, "eth_gasPrice"))
+    }
+
+    /// Current EIP-1559 priority fee suggestion as the upstream RPC
+    /// reports it. Wrapped in [`Unverifiable`] for the same reason as
+    /// [`Self::gas_price_unverifiable`].
+    pub async fn priority_fee_unverifiable(&self) -> TransportResult<Unverifiable<u128>> {
+        let v = self.inner.root.get_max_priority_fee_per_gas().await?;
+        Ok(Unverifiable::new(v, "eth_maxPriorityFeePerGas"))
+    }
+
+    /// Current blob base fee as the upstream RPC reports it. Wrapped in
+    /// [`Unverifiable`] because blob base fee, like gas price, is a
+    /// node-local estimate.
+    pub async fn blob_base_fee_unverifiable(&self) -> TransportResult<Unverifiable<u128>> {
+        let v = self.inner.root.get_blob_base_fee().await?;
+        Ok(Unverifiable::new(v, "eth_blobBaseFee"))
+    }
+
+    /// Fee history across `block_count` recent blocks. Wrapped in
+    /// [`Unverifiable`] because verifying every block's base-fee schedule
+    /// against consensus for arbitrary historical ranges isn't
+    /// trustlessly tractable from a light-client.
+    pub async fn fee_history_unverifiable(
+        &self,
+        block_count: u64,
+        last_block: BlockNumberOrTag,
+        reward_percentiles: &[f64],
+    ) -> TransportResult<Unverifiable<FeeHistory>> {
+        let v = self
+            .inner
+            .root
+            .get_fee_history(block_count, last_block, reward_percentiles)
+            .await?;
+        Ok(Unverifiable::new(v, "eth_feeHistory"))
+    }
+
+    /// Current head block number as the upstream RPC reports it. Wrapped
+    /// in [`Unverifiable`] because the tip moves between observation and
+    /// verification — by the time the helios consensus client confirms a
+    /// number, a newer block has typically arrived. Drift-tolerant by
+    /// design.
+    pub async fn block_number_unverifiable(&self) -> TransportResult<Unverifiable<u64>> {
+        let v = self.inner.root.get_block_number().await?;
+        Ok(Unverifiable::new(v, "eth_blockNumber"))
+    }
+
+    /// Chain id as the upstream RPC reports it. Wrapped in
+    /// [`Unverifiable`] because helios's chain id comes from a
+    /// configured fork schedule at client build time — there is no
+    /// consensus proof that the connected RPC speaks the same chain.
+    /// Cross-check against the configured network at startup.
+    pub async fn chain_id_unverifiable(&self) -> TransportResult<Unverifiable<u64>> {
+        let v = self.inner.root.get_chain_id().await?;
+        Ok(Unverifiable::new(v, "eth_chainId"))
     }
 
     /// Bump pending, await the verified-path call, record the outcome on
