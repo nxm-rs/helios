@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockHash, Bytes, StorageKey, TxHash, B256, U256, U64};
 use alloy::providers::{
-    Caller, EthCall, EthCallManyParams, EthCallParams, EthGetBlock, Provider, ProviderCall,
-    RootProvider, RpcWithBlock,
+    Caller, EthCall, EthCallMany, EthCallManyParams, EthCallParams, EthGetBlock, Provider,
+    ProviderCall, RootProvider, RpcWithBlock,
 };
 use alloy::rpc::types::state::StateOverride;
 use alloy::rpc::types::{
-    AccessListResult, BlockTransactionsKind, EIP1186AccountProofResponse, Filter, Log,
+    AccessListResult, BlockTransactionsKind, Bundle, EIP1186AccountProofResponse, EthCallResponse,
+    Filter, Log,
 };
 use alloy::transports::{TransportErrorKind, TransportResult};
 use helios_common::network_spec::NetworkSpec;
@@ -628,6 +629,16 @@ impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
             }))
         })
     }
+
+    fn call_many<'req>(
+        &self,
+        bundles: &'req [Bundle],
+    ) -> EthCallMany<'req, N, Vec<Vec<EthCallResponse>>> {
+        // Route through our refusing Caller impl. Alloy's default
+        // would resolve via `weak_client()` and bypass every override —
+        // a silent dispatch to the unverified RPC.
+        EthCallMany::new(self.clone(), bundles)
+    }
 }
 
 /// Block overrides aren't representable in helios's `HeliosApi::call` /
@@ -723,6 +734,41 @@ impl<N: NetworkSpec> Caller<N, U64> for VerifiedHeliosProvider<N> {
     ) -> TransportResult<ProviderCall<EthCallManyParams<'static>, U64>> {
         Err(TransportErrorKind::custom_str(
             "VerifiedHeliosProvider does not implement eth_callMany",
+        ))
+    }
+}
+
+// `Provider::call_many` resolves through `weak_client()` by default,
+// which bypasses every override on the provider type — calls would go
+// straight to the unverified RPC. Override returns an `EthCallMany`
+// backed by a `Caller<N, Vec<Vec<EthCallResponse>>>` impl that
+// refuses, so the bypass surfaces as a clear error rather than a
+// silent trust-model regression.
+impl<N: NetworkSpec> Caller<N, Vec<Vec<EthCallResponse>>> for VerifiedHeliosProvider<N> {
+    fn call(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "VerifiedHeliosProvider: Caller<Vec<Vec<EthCallResponse>>>::call is unsupported",
+        ))
+    }
+
+    fn estimate_gas(
+        &self,
+        _params: EthCallParams<N>,
+    ) -> TransportResult<ProviderCall<EthCallParams<N>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "VerifiedHeliosProvider: Caller<Vec<Vec<EthCallResponse>>>::estimate_gas is unsupported",
+        ))
+    }
+
+    fn call_many(
+        &self,
+        _params: EthCallManyParams<'_>,
+    ) -> TransportResult<ProviderCall<EthCallManyParams<'static>, Vec<Vec<EthCallResponse>>>> {
+        Err(TransportErrorKind::custom_str(
+            "VerifiedHeliosProvider does not implement eth_callMany — helios cannot back the per-bundle verified path; fan out via Provider::call per bundle if needed",
         ))
     }
 }
