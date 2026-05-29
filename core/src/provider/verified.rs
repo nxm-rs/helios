@@ -385,10 +385,37 @@ impl<N: NetworkSpec> VerifiedHeliosProvider<N> {
     /// [`Unverifiable`] because helios's chain id comes from a
     /// configured fork schedule at client build time — there is no
     /// consensus proof that the connected RPC speaks the same chain.
-    /// Cross-check against the configured network at startup.
+    ///
+    /// Prefer [`Self::assert_chain_id_matches_helios`] at startup over
+    /// reading this directly: it performs the cross-check against the
+    /// chain id helios was configured for and returns an error if the
+    /// RPC speaks a different chain.
     pub async fn chain_id_unverifiable(&self) -> TransportResult<Unverifiable<u64>> {
         let v = self.inner.root.get_chain_id().await?;
         Ok(Unverifiable::new(v, "eth_chainId"))
+    }
+
+    /// Assert that the upstream RPC's `eth_chainId` matches the chain
+    /// id helios was configured for. Returns an error if they differ —
+    /// the embedder must refuse to proceed (e.g. abort startup) on a
+    /// mismatch, since a wrong-chain RPC defeats every other
+    /// verification primitive.
+    pub async fn assert_chain_id_matches_helios(&self) -> Result<(), ChainIdMismatch> {
+        let helios_chain_id = self.inner.helios.get_chain_id().await;
+        let rpc_chain_id = self
+            .inner
+            .root
+            .get_chain_id()
+            .await
+            .map_err(|e| ChainIdMismatch::Rpc(e.to_string()))?;
+        if helios_chain_id == rpc_chain_id {
+            Ok(())
+        } else {
+            Err(ChainIdMismatch::Mismatch {
+                helios: helios_chain_id,
+                rpc: rpc_chain_id,
+            })
+        }
     }
 
     /// Bump pending, await the verified-path call, record the outcome on
@@ -839,3 +866,27 @@ impl<N: NetworkSpec> Caller<N, Vec<Vec<EthCallResponse>>> for VerifiedHeliosProv
         ))
     }
 }
+
+/// Error returned by [`VerifiedHeliosProvider::assert_chain_id_matches_helios`].
+#[derive(Debug, Clone)]
+pub enum ChainIdMismatch {
+    /// The upstream RPC returned an error when asked for its chain id.
+    Rpc(String),
+    /// Helios's configured chain id and the RPC's reported chain id
+    /// disagree. The embedder must refuse to use this provider.
+    Mismatch { helios: u64, rpc: u64 },
+}
+
+impl std::fmt::Display for ChainIdMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rpc(e) => write!(f, "could not read RPC chain id: {e}"),
+            Self::Mismatch { helios, rpc } => write!(
+                f,
+                "chain id mismatch: helios configured for {helios}, RPC reports {rpc}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ChainIdMismatch {}
