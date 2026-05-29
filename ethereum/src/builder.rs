@@ -32,8 +32,7 @@ use crate::EthereumClient;
 /// large enough that bursty insert traffic batches efficiently and
 /// small enough that a crash window stays bounded.
 #[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_CODE_CACHE_FLUSH_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(30);
+const DEFAULT_CODE_CACHE_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct EthereumClientBuilder<DB: Database> {
     network: Option<Network>,
@@ -49,8 +48,7 @@ pub struct EthereumClientBuilder<DB: Database> {
     fallback: Option<Url>,
     load_external_fallback: bool,
     strict_checkpoint_age: bool,
-    http_builder_hook:
-        Option<helios_core::execution::providers::rpc::HttpBuilderHook>,
+    http_builder_hook: Option<helios_core::execution::providers::rpc::HttpBuilderHook>,
     phantom: PhantomData<DB>,
 }
 
@@ -287,10 +285,14 @@ impl<DB: Database> EthereumClientBuilder<DB> {
         // Construct the consensus RPC up front, applying the
         // caller's `http_builder_hook` if any, then hand it to
         // ConsensusClient via the `with_rpc` variant.
-        let consensus_rpc =
-            HttpRpc::with_hook(config.consensus_rpc.as_str(), self.http_builder_hook.clone());
-        let consensus =
-            ConsensusClient::<MainnetConsensusSpec, HttpRpc, DB>::with_rpc(consensus_rpc, config.clone())?;
+        let consensus_rpc = HttpRpc::with_hook(
+            config.consensus_rpc.as_str(),
+            self.http_builder_hook.clone(),
+        );
+        let consensus = ConsensusClient::<MainnetConsensusSpec, HttpRpc, DB>::with_rpc(
+            consensus_rpc,
+            config.clone(),
+        )?;
 
         if let Some(verifiable_api) = &config.verifiable_api {
             let block_provider = BlockCache::<Ethereum>::new();

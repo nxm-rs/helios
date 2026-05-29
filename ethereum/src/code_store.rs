@@ -209,8 +209,10 @@ mod tests {
         store.persist(&[(h1, b1.clone()), (h2, b2.clone())]);
 
         // A fresh store on the same dir should observe both.
-        let reloaded: HashMap<_, _> =
-            FileCodeStore::new(dir.path().to_path_buf()).load_all().into_iter().collect();
+        let reloaded: HashMap<_, _> = FileCodeStore::new(dir.path().to_path_buf())
+            .load_all()
+            .into_iter()
+            .collect();
         assert_eq!(reloaded.len(), 2);
         assert_eq!(reloaded.get(&h1), Some(&b1));
         assert_eq!(reloaded.get(&h2), Some(&b2));
@@ -234,8 +236,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         store.persist(&[(h3, Bytes::from_static(b"c"))]);
 
-        let reloaded: HashMap<_, _> =
-            FileCodeStore::new(dir.path().to_path_buf()).load_all().into_iter().collect();
+        let reloaded: HashMap<_, _> = FileCodeStore::new(dir.path().to_path_buf())
+            .load_all()
+            .into_iter()
+            .collect();
         assert_eq!(reloaded.len(), 2);
         assert!(
             !reloaded.contains_key(&h1),
