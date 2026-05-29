@@ -1287,3 +1287,19 @@ async fn optimistic_provider_call_with_block_overrides_is_refused() {
     // Verifier never spawned.
     assert_eq!(status.counts().borrow().pending, 0);
 }
+
+#[tokio::test]
+async fn optimistic_provider_call_many_is_refused_not_silently_bypassed() {
+    use alloy::rpc::types::Bundle;
+    let (provider, _, _) = build_optimistic_with_asserter(MockHelios::default());
+
+    let bundles: [Bundle; 0] = [];
+    let err = Provider::<Ethereum>::call_many(&provider, &bundles)
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("eth_callMany"),
+        "expected eth_callMany refusal, got: {msg}"
+    );
+}
