@@ -46,4 +46,4 @@ pub use event::{
 };
 pub use status::VerificationStatus;
 pub use value::{Unverifiable, VerifiedValue};
-pub use verified::VerifiedHeliosProvider;
+pub use verified::{ChainIdMismatch, VerifiedHeliosProvider};

@@ -679,3 +679,28 @@ async fn fee_history_unverifiable_returns_wrapped_rpc_value() {
     assert_eq!(v.as_inner().oldest_block, 18_999_995);
     assert_eq!(v.into_inner().gas_used_ratio.len(), 5);
 }
+
+#[tokio::test]
+async fn assert_chain_id_matches_helios_ok() {
+    use super::verified::ChainIdMismatch;
+    // MockHelios::get_chain_id returns 1 by default; assert the RPC
+    // also returns 1.
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U64::from(1u64));
+    let r = provider.assert_chain_id_matches_helios().await;
+    assert!(matches!(r, Ok(())), "got {r:?}");
+    let _ = ChainIdMismatch::Rpc("dummy".into());
+}
+
+#[tokio::test]
+async fn assert_chain_id_matches_helios_errors_on_mismatch() {
+    use super::verified::ChainIdMismatch;
+    // Mock helios = 1, RPC = 137 → mismatch.
+    let (provider, asserter) = build_provider_with_asserter(MockHelios::default());
+    asserter.push_success(&U64::from(137u64));
+    let err = provider.assert_chain_id_matches_helios().await.unwrap_err();
+    assert!(
+        matches!(err, ChainIdMismatch::Mismatch { helios: 1, rpc: 137 }),
+        "got {err:?}"
+    );
+}
