@@ -10,9 +10,8 @@
 //! tip). Forcing the caller to call `into_inner()` makes "I'm trusting
 //! the RPC for this" syntactically visible.
 
-use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Bytes, B256, U256};
-use alloy::rpc::types::{EIP1186AccountProofResponse, Log};
+use alloy::rpc::types::{AccessListResult, EIP1186AccountProofResponse, Log};
 use helios_common::network_spec::NetworkSpec;
 
 /// Verified payload from a background verification, attached to a
@@ -34,7 +33,8 @@ pub enum VerifiedValue<N: NetworkSpec> {
     Receipt(Box<N::ReceiptResponse>),
     Logs(Vec<Log>),
     Call(Bytes),
-    AccessList(Box<AccessList>),
+    GasEstimate(u64),
+    AccessList(Box<AccessListResult>),
 }
 
 /// Wrapper for values the verified provider cannot back with consensus
