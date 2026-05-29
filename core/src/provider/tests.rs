@@ -910,3 +910,63 @@ async fn acknowledge_mismatch_emits_security_event() {
     let event = rx.recv().await.expect("MismatchAcknowledged");
     assert!(matches!(event, SecurityEvent::MismatchAcknowledged { .. }));
 }
+
+#[tokio::test]
+async fn optimistic_get_logs_matching_value_ticks_verified() {
+    // get_logs is the direct-async-fn override; cover that the shape
+    // works through the spawn_verifier helper just like the builder ones.
+    let mock = MockHelios {
+        get_logs_fn: Box::new(|_| async { Ok(Vec::new()) }.boxed()),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&Vec::<Log>::new());
+
+    let logs = Provider::<Ethereum>::get_logs(&provider, &Filter::new())
+        .await
+        .unwrap();
+    assert!(logs.is_empty());
+
+    let mut counts = status.counts();
+    while counts.borrow().verified == 0 {
+        let _ = counts.changed().await;
+    }
+    assert_eq!(counts.borrow().verified, 1);
+    assert_eq!(counts.borrow().mismatched, 0);
+}
+
+#[tokio::test]
+async fn optimistic_get_transaction_receipt_some_none_mismatch_is_caught() {
+    // ProviderCall<Option<T>> path. RPC says no receipt yet (None);
+    // helios returns a (forged) receipt -> mismatch.
+    let mock_receipt = nonexistent_receipt();
+    let mock_receipt_for_mock = mock_receipt.clone();
+    let mock = MockHelios {
+        get_transaction_receipt_fn: Box::new(move |_| {
+            let r = mock_receipt_for_mock.clone();
+            async move { Ok(Some(r)) }.boxed()
+        }),
+        ..Default::default()
+    };
+    let (provider, asserter, status) = build_optimistic_with_asserter(mock);
+    asserter.push_success(&Option::<<Ethereum as alloy::network::Network>::ReceiptResponse>::None);
+
+    let v = Provider::<Ethereum>::get_transaction_receipt(&provider, B256::ZERO)
+        .await
+        .unwrap();
+    assert!(v.is_none(), "caller sees the unverified None");
+
+    let mut health = status.health();
+    while !matches!(*health.borrow(), HealthStatus::Tainted { .. }) {
+        let _ = health.changed().await;
+    }
+
+    let counts = status.counts().borrow().clone();
+    assert_eq!(counts.mismatched, 1);
+    assert_eq!(counts.verified, 0);
+    let _ = mock_receipt;
+}
+
+fn nonexistent_receipt() -> <Ethereum as alloy::network::Network>::ReceiptResponse {
+    helios_test_utils::rpc_tx_receipt()
+}
