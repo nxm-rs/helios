@@ -852,12 +852,7 @@ async fn acknowledge_mismatch_does_not_clobber_stalled() {
 #[tokio::test]
 async fn set_health_cannot_clobber_tainted() {
     let status = VerificationStatus::<Ethereum>::new();
-    let info = MismatchInfo {
-        method: "eth_getBalance",
-        unverified: "0x1".into(),
-        verified: "0x2".into(),
-        at: std::time::Instant::now(),
-    };
+    let info = MismatchInfo::now("eth_getBalance", "0x1", "0x2");
     let handle = status._bump_pending();
     handle.record_mismatch(info);
     assert!(matches!(
@@ -886,12 +881,7 @@ async fn acknowledge_mismatch_emits_security_event() {
     let mut rx = status.take_security_events().unwrap();
 
     // First push a mismatch so there's something to acknowledge.
-    let info = MismatchInfo {
-        method: "eth_getBalance",
-        unverified: "0x1".into(),
-        verified: "0x2".into(),
-        at: std::time::Instant::now(),
-    };
+    let info = MismatchInfo::now("eth_getBalance", "0x1", "0x2");
     let handle = status._bump_pending();
     handle.record_mismatch(info);
 
