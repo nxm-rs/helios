@@ -66,9 +66,7 @@ pub enum VerificationEvent<N: NetworkSpec> {
     },
     /// Synthetic event indicating the consumer fell behind and missed
     /// `count` informational events.
-    Dropped {
-        count: u64,
-    },
+    Dropped { count: u64 },
 }
 
 impl<N: NetworkSpec> std::fmt::Debug for VerificationEvent<N> {
