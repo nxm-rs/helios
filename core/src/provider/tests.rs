@@ -1114,3 +1114,80 @@ async fn scope_barrier_with_timeout_counts_only_scope_pending() {
 
     release.notify_one();
 }
+
+#[tokio::test]
+async fn builder_verified_only_blocks_until_helios_returns() {
+    use super::builder::{HeliosProviderBuilder, Routing};
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(7)) }.boxed()),
+        ..Default::default()
+    };
+    let asserter = Asserter::new();
+    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter));
+    let (provider, status) = HeliosProviderBuilder::new(Arc::new(mock), root)
+        .routing(Routing::VerifiedOnly)
+        .build_with_status();
+
+    // Verified-only path: helios returns 7, that's what we get.
+    let v = Provider::<Ethereum>::get_balance(&provider, addr(80))
+        .await
+        .unwrap();
+    assert_eq!(v, U256::from(7));
+
+    // Verified counter ticked synchronously.
+    assert_eq!(status.counts().borrow().verified, 1);
+}
+
+#[tokio::test]
+async fn builder_optimistic_then_verified_returns_rpc_value_immediately() {
+    use super::builder::{HeliosProviderBuilder, Routing};
+    let mock = MockHelios {
+        get_balance_fn: Box::new(|_, _| async { Ok(U256::from(7)) }.boxed()),
+        ..Default::default()
+    };
+    let asserter = Asserter::new();
+    asserter.push_success(&U256::from(99));
+    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter));
+    let (provider, status) = HeliosProviderBuilder::new(Arc::new(mock), root)
+        .routing(Routing::OptimisticThenVerified)
+        .build_with_status();
+
+    // Optimistic: returns the unverified RPC value (99), not the
+    // helios verified value (7).
+    let v = Provider::<Ethereum>::get_balance(&provider, addr(81))
+        .await
+        .unwrap();
+    assert_eq!(v, U256::from(99));
+
+    // Background verifier eventually marks mismatch.
+    let mut counts = status.counts();
+    while counts.borrow().mismatched == 0 {
+        let _ = counts.changed().await;
+    }
+    assert_eq!(counts.borrow().mismatched, 1);
+}
+
+#[tokio::test]
+async fn builder_rpc_then_verified_skips_helios_entirely() {
+    use super::builder::{HeliosProviderBuilder, Routing};
+    // Mock helios panics if called — this routing must not invoke it.
+    let mock = MockHelios::default();
+    let asserter = Asserter::new();
+    asserter.push_success(&U256::from(42));
+    let root: RootProvider<Ethereum> = RootProvider::new(RpcClient::mocked(asserter));
+    let (provider, status) = HeliosProviderBuilder::new(Arc::new(mock), root)
+        .routing(Routing::RpcThenVerified)
+        .build_with_status();
+
+    let v = Provider::<Ethereum>::get_balance(&provider, addr(82))
+        .await
+        .unwrap();
+    assert_eq!(v, U256::from(42));
+
+    // No verifier spawned -> counts stay at zero.
+    let counts = status.counts().borrow().clone();
+    assert_eq!(counts.verified, 0);
+    assert_eq!(counts.mismatched, 0);
+    assert_eq!(counts.failed, 0);
+    assert_eq!(counts.pending, 0);
+}
