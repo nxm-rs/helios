@@ -4021,6 +4021,7 @@ dependencies = [
  "schnellru",
  "serde",
  "serde_json",
+ "sha2 0.9.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

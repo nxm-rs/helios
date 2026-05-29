@@ -30,6 +30,7 @@ schnellru = "0.2"
 parking_lot = "0.12.2"
 
 # misc
+sha2 = "0.9"
 eyre.workspace = true
 hex.workspace = true
 tracing.workspace = true
