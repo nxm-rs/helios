@@ -39,6 +39,18 @@ use crate::client::api::HeliosApi;
 use crate::provider::error::{FailureInfo, MismatchInfo};
 use crate::provider::status::VerificationStatus;
 
+// tokio::spawn requires Send; wasm_bindgen_futures::spawn_local does not.
+// MaybeSend collapses the two into one bound the verifier closures can satisfy
+// on both targets.
+#[cfg(not(target_arch = "wasm32"))]
+trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+#[cfg(target_arch = "wasm32")]
+trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
+
 /// Optimistic-first helios provider. Returns the unverified RPC value
 /// immediately and verifies in the background.
 ///
@@ -108,11 +120,11 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
         verify: F,
         project: P,
     ) where
-        T: Send + 'static,
-        U: Send + 'static,
-        F: FnOnce(Arc<dyn HeliosApi<N>>) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<U>> + Send + 'static,
-        P: Fn(&T, &U) -> (R, R) + Send + 'static,
+        T: MaybeSend + 'static,
+        U: MaybeSend + 'static,
+        F: FnOnce(Arc<dyn HeliosApi<N>>) -> Fut + MaybeSend + 'static,
+        Fut: Future<Output = eyre::Result<U>> + MaybeSend + 'static,
+        P: Fn(&T, &U) -> (R, R) + MaybeSend + 'static,
         R: PartialEq + std::fmt::Debug,
     {
         use futures::future::FutureExt;
