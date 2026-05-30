@@ -116,9 +116,10 @@ impl<E: ExecutionProvider<Ethereum>> EthereumEvm<E> {
         let spec = get_spec_id_for_block_timestamp(block.header.timestamp, &self.fork_schedule);
         let mut tx_env = Self::tx_env(tx, spec);
 
-        if <TxType as Into<u8>>::into(
-            <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::output_tx_type(tx),
-        ) == 0u8
+        if <TxType as Into<u8>>::into(<TransactionRequest as NetworkTransactionBuilder<
+            Ethereum,
+        >>::output_tx_type(tx))
+            == 0u8
         {
             tx_env.chain_id = None;
         } else {
@@ -157,14 +158,14 @@ impl<E: ExecutionProvider<Ethereum>> EthereumEvm<E> {
             data: <TransactionRequest as TransactionBuilder>::input(tx)
                 .unwrap_or_default()
                 .clone(),
-            nonce: <TransactionRequest as TransactionBuilder>::nonce(tx)
-                .unwrap_or_default(),
+            nonce: <TransactionRequest as TransactionBuilder>::nonce(tx).unwrap_or_default(),
             chain_id: <TransactionRequest as TransactionBuilder>::chain_id(tx),
             access_list: <TransactionRequest as TransactionBuilder>::access_list(tx)
                 .cloned()
                 .unwrap_or_default(),
-            gas_priority_fee:
-                <TransactionRequest as TransactionBuilder>::max_priority_fee_per_gas(tx),
+            gas_priority_fee: <TransactionRequest as TransactionBuilder>::max_priority_fee_per_gas(
+                tx,
+            ),
             max_fee_per_blob_gas: tx.max_fee_per_blob_gas.unwrap_or_default(),
             blob_hashes: tx
                 .blob_versioned_hashes

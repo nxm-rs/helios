@@ -33,6 +33,7 @@ async fn test_construct_checkpoints() {
 }
 
 #[tokio::test]
+#[ignore = "hits live third-party checkpoint sync endpoints; flaky in CI"]
 async fn test_fetch_latest_checkpoints() {
     let cf = checkpoints::CheckpointFallback::new()
         .build()

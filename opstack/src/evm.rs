@@ -119,9 +119,10 @@ impl<E: ExecutionProvider<OpStack>> OpStackEvm<E> {
     ) -> OpContext<EmptyDB> {
         let mut tx_env = Self::tx_env(tx);
 
-        if <OpTxType as Into<u8>>::into(
-            <OpTransactionRequest as NetworkTransactionBuilder<OpStack>>::output_tx_type(tx),
-        ) == 0u8
+        if <OpTxType as Into<u8>>::into(<OpTransactionRequest as NetworkTransactionBuilder<
+            OpStack,
+        >>::output_tx_type(tx))
+            == 0u8
         {
             tx_env.chain_id = None;
         } else {
@@ -147,23 +148,21 @@ impl<E: ExecutionProvider<OpStack>> OpStackEvm<E> {
 
     fn tx_env(tx: &OpTransactionRequest) -> TxEnv {
         TxEnv {
-            tx_type: <OpTransactionRequest as NetworkTransactionBuilder<OpStack>>::output_tx_type(tx)
-                .into(),
-            caller: <OpTransactionRequest as TransactionBuilder>::from(tx)
-                .unwrap_or_default(),
+            tx_type: <OpTransactionRequest as NetworkTransactionBuilder<OpStack>>::output_tx_type(
+                tx,
+            )
+            .into(),
+            caller: <OpTransactionRequest as TransactionBuilder>::from(tx).unwrap_or_default(),
             gas_limit: <OpTransactionRequest as TransactionBuilder>::gas_limit(tx)
                 .unwrap_or(u64::MAX),
             gas_price: <OpTransactionRequest as TransactionBuilder>::gas_price(tx)
                 .unwrap_or_default(),
-            kind: <OpTransactionRequest as TransactionBuilder>::kind(tx)
-                .unwrap_or_default(),
-            value: <OpTransactionRequest as TransactionBuilder>::value(tx)
-                .unwrap_or_default(),
+            kind: <OpTransactionRequest as TransactionBuilder>::kind(tx).unwrap_or_default(),
+            value: <OpTransactionRequest as TransactionBuilder>::value(tx).unwrap_or_default(),
             data: <OpTransactionRequest as TransactionBuilder>::input(tx)
                 .unwrap_or_default()
                 .clone(),
-            nonce: <OpTransactionRequest as TransactionBuilder>::nonce(tx)
-                .unwrap_or_default(),
+            nonce: <OpTransactionRequest as TransactionBuilder>::nonce(tx).unwrap_or_default(),
             chain_id: <OpTransactionRequest as TransactionBuilder>::chain_id(tx),
             access_list: <OpTransactionRequest as TransactionBuilder>::access_list(tx)
                 .cloned()
