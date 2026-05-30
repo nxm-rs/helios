@@ -114,7 +114,11 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
         use futures::future::FutureExt;
         let handle = self.inner.status._bump_pending();
         let helios = self.inner.helios.clone();
-        tokio::spawn(async move {
+        #[cfg(not(target_arch = "wasm32"))]
+        let run = tokio::spawn;
+        #[cfg(target_arch = "wasm32")]
+        let run = wasm_bindgen_futures::spawn_local;
+        run(async move {
             let result = std::panic::AssertUnwindSafe(helios.get_balance(address, block_id))
                 .catch_unwind()
                 .await;
