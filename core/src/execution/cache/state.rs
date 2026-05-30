@@ -742,7 +742,9 @@ mod tests {
                 "delegation designator must not be persisted, got: {snapshot:?}"
             );
             assert!(
-                snapshot.iter().any(|(h, b)| *h == contract_hash && b == &contract_code),
+                snapshot
+                    .iter()
+                    .any(|(h, b)| *h == contract_hash && b == &contract_code),
                 "real contract code must be persisted, got: {snapshot:?}"
             );
         }

@@ -223,16 +223,16 @@ fn rpc_exists() -> bool {
     env::var("MAINNET_EXECUTION_RPC").is_ok_and(|rpc| !rpc.is_empty())
 }
 
-fn ensure_rpc_env() {
+fn ensure_rpc_env() -> bool {
     if !rpc_exists() {
-        panic!(
-            "MAINNET_EXECUTION_RPC environment variable is required for RPC equivalence tests.\n\
-            Set it to a mainnet Ethereum RPC URL, for example:\n\
-            export MAINNET_EXECUTION_RPC=https://eth-mainnet.alchemyapi.io/v2/YOUR_API_KEY\n\
-            or\n\
-            export MAINNET_EXECUTION_RPC=https://mainnet.infura.io/v3/YOUR_PROJECT_ID"
+        eprintln!(
+            "skipping rpc_equivalence_tests: MAINNET_EXECUTION_RPC not set.\n\
+            Set it to a mainnet Ethereum RPC URL to run this suite, e.g.:\n\
+            export MAINNET_EXECUTION_RPC=https://eth-mainnet.alchemyapi.io/v2/YOUR_API_KEY"
         );
+        return false;
     }
+    true
 }
 
 async fn test_get_transaction_by_hash(
@@ -1442,7 +1442,9 @@ async fn test_call_with_combined_overrides(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_equivalence_tests() {
-    ensure_rpc_env();
+    if !ensure_rpc_env() {
+        return;
+    }
 
     println!("Setting up Helios instances (this may take a few seconds)...");
     let (_handle1, _handle2, _handle3, providers) = setup().await;

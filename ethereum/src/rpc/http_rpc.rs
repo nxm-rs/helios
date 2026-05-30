@@ -79,8 +79,9 @@ impl HttpRpc {
     /// delegates to this with `hook = None`.
     pub fn with_hook(
         rpc: &str,
-        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-        hook: Option<helios_core::execution::providers::rpc::HttpBuilderHook>,
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] hook: Option<
+            helios_core::execution::providers::rpc::HttpBuilderHook,
+        >,
     ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let client = {
