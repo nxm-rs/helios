@@ -161,24 +161,30 @@ pub fn spawn_supervisor<N: NetworkSpec>(
         inner: inner.clone(),
     };
 
-    let weak = Arc::downgrade(&inner);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(policy.check_interval);
-        // `interval` fires immediately on first poll; skip that.
-        tick.tick().await;
-        loop {
+    // wasm32 has no tokio runtime / timer driver. Embedders on that
+    // target call SupervisorHandle::report_* directly and don't get
+    // the periodic stall check.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let weak = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(policy.check_interval);
+            // `interval` fires immediately on first poll; skip that.
             tick.tick().await;
-            let Some(inner) = Weak::upgrade(&weak) else {
-                // All external handles dropped — exit cleanly.
-                break;
-            };
-            let last = *inner.last_advance.lock();
-            let age = last.elapsed();
-            if age > inner.policy.head_age_threshold {
-                inner.status._set_health(HealthStatus::Stalled);
+            loop {
+                tick.tick().await;
+                let Some(inner) = Weak::upgrade(&weak) else {
+                    // All external handles dropped — exit cleanly.
+                    break;
+                };
+                let last = *inner.last_advance.lock();
+                let age = last.elapsed();
+                if age > inner.policy.head_age_threshold {
+                    inner.status._set_health(HealthStatus::Stalled);
+                }
             }
-        }
-    });
+        });
+    }
 
     handle
 }
