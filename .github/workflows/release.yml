@@ -7,7 +7,7 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
       - name: Check version consistency
@@ -18,19 +18,17 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: build
         run: cargo build --package helios-cli --release --target aarch64-apple-darwin
@@ -44,7 +42,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -58,19 +56,17 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: build
         run: cargo build --package helios-cli --release --target x86_64-apple-darwin	
@@ -84,7 +80,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -98,14 +94,12 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add aarch64-unknown-linux-gnu
@@ -116,7 +110,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: build
         run: cargo build --package helios-cli --release --target aarch64-unknown-linux-gnu
@@ -130,7 +124,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -144,19 +138,17 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add x86_64-unknown-linux-gnu
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: build
         run: cargo build --package helios-cli --release --target x86_64-unknown-linux-gnu
@@ -170,7 +162,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -184,14 +176,12 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add armv7-unknown-linux-gnueabihf
@@ -203,7 +193,7 @@ jobs:
           echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
           ldd --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
         with:
           prefix-key: "fresh2"
 
@@ -219,7 +209,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -233,14 +223,12 @@ jobs:
     needs: version-check
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: install rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: install target
         run: rustup target add riscv64gc-unknown-linux-gnu
@@ -251,7 +239,7 @@ jobs:
           sudo apt-get install -y gcc-riscv64-linux-gnu
           echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: build
         run: cargo build --package helios-cli --release --target riscv64gc-unknown-linux-gnu
@@ -265,7 +253,7 @@ jobs:
           echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
 
       - name: release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
@@ -282,22 +270,20 @@ jobs:
         working-directory: ./helios-ts
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: '20'
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # master
         with:
           toolchain: stable
-          default: true
-          override: true
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: Install Node.js dependencies
         run: npm ci
@@ -320,7 +306,7 @@ jobs:
           echo "release_tag=nightly-${GITHUB_SHA}" >> $GITHUB_OUTPUT
 
       - name: Release npm package to GitHub Releases
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           prerelease: true
