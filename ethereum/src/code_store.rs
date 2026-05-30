@@ -64,7 +64,7 @@ impl FileCodeStore {
     }
 
     /// Walk the directory and collect (path, mtime, parsed hash)
-    /// tuples for every well-formed `.bin` file. Files with unparseable
+    /// tuples for every well-formed `.bin` file. Files with unparsable
     /// names or unreadable metadata are skipped.
     fn list_entries(&self) -> Vec<(PathBuf, SystemTime, B256)> {
         let entries = match fs::read_dir(&self.dir) {
