@@ -17,6 +17,7 @@ use alloy::providers::{
     Caller, EthCall, EthCallMany, EthCallManyParams, EthCallParams, EthGetBlock, Provider,
     ProviderCall, RootProvider, RpcWithBlock,
 };
+use alloy::rpc::types::simulate::{SimulatePayload, SimulatedBlock};
 use alloy::rpc::types::state::StateOverride;
 use alloy::rpc::types::{
     AccessListResult, BlockTransactionsKind, Bundle, EIP1186AccountProofResponse, EthCallResponse,
@@ -649,6 +650,27 @@ impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
         )
     }
 
+    fn get_block_by_number(&self, number: BlockNumberOrTag) -> EthGetBlock<N::BlockResponse> {
+        // Alloy's default routes straight to `self.client()` and bypasses
+        // every override — so without this the verified path is skipped
+        // and callers silently receive an unverified block.
+        let provider = self.clone();
+        let block_id = BlockId::Number(number);
+        EthGetBlock::new_provider(
+            block_id,
+            Box::new(move |kind| {
+                let provider = provider.clone();
+                let full_tx = matches!(kind, BlockTransactionsKind::Full);
+                ProviderCall::BoxedFuture(Box::pin(async move {
+                    provider
+                        .block_verified(block_id, full_tx)
+                        .await
+                        .map_err(TransportErrorKind::custom)
+                }))
+            }),
+        )
+    }
+
     fn get_proof(
         &self,
         address: Address,
@@ -732,6 +754,25 @@ impl<N: NetworkSpec> Provider<N> for VerifiedHeliosProvider<N> {
         // would resolve via `weak_client()` and bypass every override —
         // a silent dispatch to the unverified RPC.
         EthCallMany::new(self.clone(), bundles)
+    }
+
+    fn simulate<'req>(
+        &self,
+        _payload: &'req SimulatePayload,
+    ) -> RpcWithBlock<&'req SimulatePayload, Vec<SimulatedBlock<N::BlockResponse>>> {
+        // Alloy's default goes straight through `self.client()` and
+        // bypasses every override on the verified surface — callers
+        // would receive an unverified `eth_simulateV1` result while
+        // believing it was verified. Helios does not yet model a
+        // verified `eth_simulateV1`, so the verified surface refuses
+        // rather than silently downgrading the trust model.
+        RpcWithBlock::new_provider(move |_block_id| {
+            ProviderCall::BoxedFuture(Box::pin(async move {
+                Err(TransportErrorKind::custom_str(
+                    "VerifiedHeliosProvider does not implement eth_simulateV1 — helios cannot back the verified path; the verified surface refuses rather than silently downgrade",
+                ))
+            }))
+        })
     }
 }
 
