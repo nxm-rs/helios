@@ -176,8 +176,20 @@ pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
     let mut health_rx = status.health();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<HealthStatus>(8);
 
-    // Watcher: every change observed on health() is enqueued on tx.
+    // Watcher: enqueue the CURRENT state first, then every subsequent
+    // change. `watch::Receiver::changed` only fires on transitions
+    // AFTER subscription, and the builder pre-flips Tainted from the
+    // persisted store BEFORE this task is spawned — without the
+    // initial enqueue, that pre-flip is observed only when the next
+    // change happens, and `watch`'s coalescing means a fast
+    // Tainted{A} -> Tainted{B} burst delivers only B to the worker.
+    // Enqueueing the current state up front gives the worker a chance
+    // to record A before any later overwrite arrives.
     tokio::spawn(async move {
+        let initial = health_rx.borrow().clone();
+        if tx.send(initial).await.is_err() {
+            return;
+        }
         while health_rx.changed().await.is_ok() {
             let current = health_rx.borrow().clone();
             if tx.send(current).await.is_err() {
@@ -194,6 +206,20 @@ pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
             let store = store.clone();
             let _ = tokio::task::spawn_blocking(move || match state {
                 HealthStatus::Tainted { first_mismatch } => {
+                    // Idempotent: if disk already holds an equal
+                    // record, skip the rewrite. Combined with the
+                    // in-memory sticky-first-mismatch guard in
+                    // `record_mismatch`, this protects the persisted
+                    // first observation from being clobbered by a
+                    // late-delivered duplicate or a watcher coalesce
+                    // that drops the initial state across a restart.
+                    match store.load() {
+                        Ok(Some(existing)) if existing == *first_mismatch => return,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "taint store load failed; proceeding with save");
+                        }
+                    }
                     if let Err(e) = store.save(&first_mismatch) {
                         tracing::warn!(error = %e, "taint store save failed");
                     }
