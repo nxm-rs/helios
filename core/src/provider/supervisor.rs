@@ -179,6 +179,18 @@ pub fn spawn_supervisor<N: NetworkSpec>(
                 };
                 let last = *inner.last_advance.lock();
                 let age = last.elapsed();
+                // Refresh head_age every tick so observers reading
+                // consensus_status() see a current value alongside
+                // health(). Only wake receivers when the rounded-to-
+                // seconds age changes — sub-second jitter every
+                // check_interval would spam every observer otherwise.
+                inner.status._modify_consensus_status_if(|c| {
+                    if c.head_age.as_secs() == age.as_secs() {
+                        return false;
+                    }
+                    c.head_age = age;
+                    true
+                });
                 if age > inner.policy.head_age_threshold {
                     inner.status._set_health(HealthStatus::Stalled);
                 }

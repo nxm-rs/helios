@@ -374,6 +374,16 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         self.inner.consensus_tx.send_modify(f);
     }
 
+    /// Producer side: conditionally mutate consensus status. The
+    /// closure returns `true` to wake observers, `false` to leave the
+    /// watch channel quiet. Used by the periodic stall-check task so it
+    /// can refresh `head_age` every tick without spamming receivers
+    /// when the value hasn't materially changed.
+    #[doc(hidden)]
+    pub fn _modify_consensus_status_if<F: FnOnce(&mut ConsensusStatus) -> bool>(&self, f: F) {
+        self.inner.consensus_tx.send_if_modified(f);
+    }
+
     /// Producer side: set health status. Called by the consensus
     /// supervisor when stall thresholds trip or recover.
     ///
