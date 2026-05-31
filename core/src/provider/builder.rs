@@ -125,11 +125,8 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
                         error = %err,
                         "taint store load failed; pre-flipping Tainted",
                     );
-                    let info = MismatchInfo::now(
-                        "<persistence load>",
-                        "load error",
-                        err.to_string(),
-                    );
+                    let info =
+                        MismatchInfo::now("<persistence load>", "load error", err.to_string());
                     status._set_health(HealthStatus::Tainted {
                         first_mismatch: Box::new(info),
                     });
