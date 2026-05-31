@@ -50,13 +50,13 @@ use crate::provider::status::VerificationStatus;
 // tokio::spawn requires Send; wasm_bindgen_futures::spawn_local does not.
 // MaybeSend collapses the two into one bound the verifier closures can satisfy
 // on both targets.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 trait MaybeSend: Send {}
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 impl<T: Send> MaybeSend for T {}
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 trait MaybeSend {}
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 impl<T> MaybeSend for T {}
 
 /// Optimistic-first helios provider. Returns the unverified RPC value
@@ -138,9 +138,9 @@ impl<N: NetworkSpec> OptimisticHeliosProvider<N> {
         use futures::future::FutureExt;
         let handle = self.inner.status._bump_pending();
         let helios = self.inner.helios.clone();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         let run = tokio::spawn;
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_family = "wasm")]
         let run = wasm_bindgen_futures::spawn_local;
         run(async move {
             let result = std::panic::AssertUnwindSafe(verify(helios))

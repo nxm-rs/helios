@@ -168,7 +168,7 @@ impl TaintStore for FileTaintStore {
 /// transitions so two `save`s or a `save` + `clear` can't race each
 /// other on disk. Errors from the store are logged via
 /// `tracing::warn!`.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
     status: &VerificationStatus<N>,
     store: Arc<dyn TaintStore>,
@@ -239,7 +239,7 @@ pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
 // wasm32 has no blocking thread pool; file-based persistence isn't
 // applicable. Embedders that need wasm persistence should plumb in
 // an async store via a different mechanism.
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
     _status: &VerificationStatus<N>,
     _store: Arc<dyn TaintStore>,
