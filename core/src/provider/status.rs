@@ -572,9 +572,7 @@ impl<N: NetworkSpec> Scope<N> {
     /// their `Tainted` flag — if any was a mismatch — still refuses
     /// the barrier via the sticky `health()` check.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
-        let receivers = self
-            .status
-            .snapshot_receivers_up_to_current(self.start_id);
+        let receivers = self.status.snapshot_receivers_up_to_current(self.start_id);
         self.status.barrier_over_receivers(receivers).await
     }
 
@@ -584,9 +582,7 @@ impl<N: NetworkSpec> Scope<N> {
         &self,
         timeout: std::time::Duration,
     ) -> Result<VerifiedSnapshot, VerificationError> {
-        let receivers = self
-            .status
-            .snapshot_receivers_up_to_current(self.start_id);
+        let receivers = self.status.snapshot_receivers_up_to_current(self.start_id);
         self.status
             .barrier_with_timeout_over_receivers(receivers, timeout)
             .await
