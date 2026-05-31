@@ -164,7 +164,7 @@ pub fn spawn_supervisor<N: NetworkSpec>(
     // wasm32 has no tokio runtime / timer driver. Embedders on that
     // target call SupervisorHandle::report_* directly and don't get
     // the periodic stall check.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(target_family = "wasm"))]
     {
         let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
