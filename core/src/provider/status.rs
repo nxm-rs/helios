@@ -231,24 +231,25 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         pending.values().map(watch::Sender::subscribe).collect()
     }
 
-    /// Snapshot the pending registry filtered to ids in `[start, end)`.
-    /// Used by [`Scope`] to barrier only on calls made after scope
-    /// creation.
-    pub(crate) fn snapshot_receivers_in_range(
+    /// Snapshot the pending registry filtered to ids in `[start, end)`
+    /// where `end` is sampled from `next_id` under the **same** lock
+    /// that `_bump_pending` uses to publish new ids. This closes a
+    /// TOCTOU window: a concurrent bump that completes between an
+    /// external `next_id` read and the registry snapshot would land
+    /// with `id == end`, get filtered out by `id < end`, and the
+    /// barrier would miss it. Locking once makes the (end_id,
+    /// receivers) pair internally consistent.
+    pub(crate) fn snapshot_receivers_up_to_current(
         &self,
         start: u64,
-        end: u64,
     ) -> Vec<watch::Receiver<Option<RequestOutcome>>> {
         let pending = self.inner.pending.lock();
+        let end = self.inner.next_id.load(Ordering::Relaxed);
         pending
             .iter()
             .filter(|(id, _)| **id >= start && **id < end)
             .map(|(_, tx)| tx.subscribe())
             .collect()
-    }
-
-    pub(crate) fn next_id_snapshot(&self) -> u64 {
-        self.inner.next_id.load(Ordering::Relaxed)
     }
 
     async fn drain_receivers(
@@ -287,6 +288,15 @@ impl<N: NetworkSpec> VerificationStatus<N> {
         }
         if !failures.is_empty() {
             return Err(VerificationError::Failed { calls: failures });
+        }
+        // Re-check the sticky taint AFTER drain. A mismatch on an
+        // out-of-snapshot call (or any call whose receiver was not in
+        // the barrier's set) can flip Tainted while we wait. "Tainted
+        // is not scope-local" is the documented contract; honour it
+        // by failing closed whenever the provider is currently tainted,
+        // regardless of which receivers fed this barrier.
+        if self.is_tainted() {
+            return Err(VerificationError::Tainted);
         }
         let consensus = self.inner.consensus_rx.borrow().clone();
         Ok(VerifiedSnapshot {
@@ -455,10 +465,21 @@ impl<N: NetworkSpec> PendingHandle<N> {
         // for sign-gating, and it must precede the security event push
         // so backpressure on the event channel cannot delay the trust
         // signal.
-        self.status.inner.health_tx.send_modify(|s| {
+        //
+        // Sticky `first_mismatch`: if we're already Tainted, do not
+        // overwrite the recorded first mismatch — only the very first
+        // observation defines the trust-loss event. Subsequent
+        // mismatches still bump the counter and emit a SecurityEvent
+        // below, but the persisted `first_mismatch` value is invariant
+        // after the initial flip.
+        self.status.inner.health_tx.send_if_modified(|s| {
+            if matches!(s, HealthStatus::Tainted { .. }) {
+                return false;
+            }
             *s = HealthStatus::Tainted {
                 first_mismatch: Box::new(info.clone()),
             };
+            true
         });
         self.status.inner.counts_tx.send_modify(|c| {
             c.pending = c.pending.saturating_sub(1);
@@ -541,10 +562,9 @@ impl<N: NetworkSpec> Scope<N> {
     /// their `Tainted` flag — if any was a mismatch — still refuses
     /// the barrier via the sticky `health()` check.
     pub async fn barrier(&self) -> Result<VerifiedSnapshot, VerificationError> {
-        let end_id = self.status.next_id_snapshot();
         let receivers = self
             .status
-            .snapshot_receivers_in_range(self.start_id, end_id);
+            .snapshot_receivers_up_to_current(self.start_id);
         self.status.barrier_over_receivers(receivers).await
     }
 
@@ -554,10 +574,9 @@ impl<N: NetworkSpec> Scope<N> {
         &self,
         timeout: std::time::Duration,
     ) -> Result<VerifiedSnapshot, VerificationError> {
-        let end_id = self.status.next_id_snapshot();
         let receivers = self
             .status
-            .snapshot_receivers_in_range(self.start_id, end_id);
+            .snapshot_receivers_up_to_current(self.start_id);
         self.status
             .barrier_with_timeout_over_receivers(receivers, timeout)
             .await

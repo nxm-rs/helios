@@ -52,7 +52,7 @@ pub struct FailureInfo {
 /// since the unix epoch — chosen over [`Instant`] because
 /// `MismatchInfo` outlives the process across restarts, and absolute
 /// time is what diagnostic UIs actually want anyway.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MismatchInfo {
     pub method: Cow<'static, str>,
     /// JSON-serialised unverified value. Boxed `str` keeps the struct
