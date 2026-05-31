@@ -7,6 +7,7 @@ use alloy::providers::{DynProvider, RootProvider};
 use helios_common::network_spec::NetworkSpec;
 
 use crate::client::api::HeliosApi;
+use crate::provider::error::MismatchInfo;
 use crate::provider::event::HealthStatus;
 use crate::provider::optimistic::OptimisticHeliosProvider;
 use crate::provider::persistence::{spawn_taint_persistence, TaintConfig};
@@ -107,10 +108,32 @@ impl<N: NetworkSpec> HeliosProviderBuilder<N> {
         let status = self.status.unwrap_or_default();
 
         if let Some(store) = self.taint_config.and_then(TaintConfig::into_store) {
-            if let Ok(Some(info)) = store.load() {
-                status._set_health(HealthStatus::Tainted {
-                    first_mismatch: Box::new(info),
-                });
+            match store.load() {
+                Ok(Some(info)) => {
+                    status._set_health(HealthStatus::Tainted {
+                        first_mismatch: Box::new(info),
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    // Fail closed: a corrupt / unreadable persisted record
+                    // is treated as taint of unknown origin, not as "no
+                    // taint". The synthetic MismatchInfo records the load
+                    // failure so the embedder can surface it via the
+                    // usual health() / acknowledge_mismatch flow.
+                    tracing::warn!(
+                        error = %err,
+                        "taint store load failed; pre-flipping Tainted",
+                    );
+                    let info = MismatchInfo::now(
+                        "<persistence load>",
+                        "load error",
+                        err.to_string(),
+                    );
+                    status._set_health(HealthStatus::Tainted {
+                        first_mismatch: Box::new(info),
+                    });
+                }
             }
             spawn_taint_persistence(&status, store);
         }
