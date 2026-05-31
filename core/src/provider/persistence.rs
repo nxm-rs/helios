@@ -176,18 +176,16 @@ pub(crate) fn spawn_taint_persistence<N: NetworkSpec>(
     let mut health_rx = status.health();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<HealthStatus>(8);
 
-    // Watcher: enqueue the CURRENT state first, then every subsequent
-    // change. `watch::Receiver::changed` only fires on transitions
-    // AFTER subscription, and the builder pre-flips Tainted from the
-    // persisted store BEFORE this task is spawned — without the
-    // initial enqueue, that pre-flip is observed only when the next
-    // change happens, and `watch`'s coalescing means a fast
-    // Tainted{A} -> Tainted{B} burst delivers only B to the worker.
-    // Enqueueing the current state up front gives the worker a chance
-    // to record A before any later overwrite arrives.
+    // Watcher: only enqueue a Tainted initial state. The builder
+    // pre-flips Tainted from the persisted store BEFORE this task
+    // spawns; `watch::Receiver::changed` only fires on transitions
+    // after subscription, so without the initial check that pre-flip
+    // would never reach the worker. Healthy at startup is skipped —
+    // there's nothing to persist and the no-op clear() spawn_blocking
+    // adds startup latency.
     tokio::spawn(async move {
         let initial = health_rx.borrow().clone();
-        if tx.send(initial).await.is_err() {
+        if matches!(initial, HealthStatus::Tainted { .. }) && tx.send(initial).await.is_err() {
             return;
         }
         while health_rx.changed().await.is_ok() {
