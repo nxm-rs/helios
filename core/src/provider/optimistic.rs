@@ -22,6 +22,7 @@
 //! `Tainted` against any honest RPC the first time the user reads a
 //! compound type.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -585,16 +586,45 @@ impl<N: NetworkSpec> Provider<N> for OptimisticHeliosProvider<N> {
     }
 }
 
+/// Canonical, order-independent projection of an `AccessList`. The
+/// list and per-item `storage_keys` order is implementation-defined,
+/// so two honest RPCs returning the same touched (address, slot) pairs
+/// in different orders must compare equal.
+#[derive(Debug, PartialEq, Eq)]
+struct AccessListKey {
+    gas_used: U256,
+    access_list: BTreeMap<Address, BTreeSet<B256>>,
+}
+
+fn canonical_access_list(
+    list: &alloy::eips::eip2930::AccessList,
+) -> BTreeMap<Address, BTreeSet<B256>> {
+    let mut out: BTreeMap<Address, BTreeSet<B256>> = BTreeMap::new();
+    for item in &list.0 {
+        out.entry(item.address)
+            .or_default()
+            .extend(item.storage_keys.iter().copied());
+    }
+    out
+}
+
+impl From<&AccessListResult> for AccessListKey {
+    fn from(r: &AccessListResult) -> Self {
+        Self {
+            gas_used: r.gas_used,
+            access_list: canonical_access_list(&r.access_list),
+        }
+    }
+}
+
 /// Projector for `AccessListResult`. Compares `access_list` and
 /// `gas_used` (consensus-anchored execution outputs). The `error`
 /// field is implementation-specific and not compared.
 fn access_list_projection(
     u: &AccessListResult,
     v: &AccessListResult,
-) -> ((U256, String), (U256, String)) {
-    let u_al = serde_json::to_string(&u.access_list).unwrap_or_default();
-    let v_al = serde_json::to_string(&v.access_list).unwrap_or_default();
-    ((u.gas_used, u_al), (v.gas_used, v_al))
+) -> (AccessListKey, AccessListKey) {
+    (u.into(), v.into())
 }
 
 /// Block overrides aren't representable in helios's `HeliosApi::call` /
